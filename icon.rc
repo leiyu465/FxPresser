@@ -1,1 +1,3 @@
+// FxPresser application icon (multi-resolution ICO)
 IDI_ICON1 ICON "icon.ico"
+1 24 "app.manifest"

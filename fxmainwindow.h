@@ -19,7 +19,7 @@
 #include <QJsonValue>
 #include <QJsonArray>
 
-#include <Windows.h>
+#include <windows.h>
 
 #include <array>
 #include <utility>
@@ -31,6 +31,8 @@ struct SConfigData
     double fxCD[10]; //单个按键的间隔
     double globalInterval; //Fx排队间隔
     int defaultKey; //缺省技能的位置，没有则为-1
+    int sendMethod; //按键发送方式
+    double keyHoldInterval; //KEYDOWN与KEYUP之间的间隔
 
     QString title; //游戏窗口标题
     QByteArray hash; //角色名图片hash
@@ -43,6 +45,8 @@ struct SConfigData
         std::fill(fxCD, fxCD + 10, 1.0);
         globalInterval = 0.8;
         defaultKey = -1;
+        sendMethod = 2; //默认使用“按键消息”
+        keyHoldInterval = 0.1;
 
         x = -1;
         y = -1;
@@ -63,6 +67,9 @@ private:
     QLineEdit* line_title;
     QPushButton* btn_change_title;
     QPushButton* btn_switch_to_window;
+    QPushButton* btn_show_log;
+    QComboBox* combo_send_method;
+    QDoubleSpinBox* spin_key_hold_interval;
     QCheckBox* check_global_switch;
     QDoubleSpinBox* spin_global_interval;
     std::array<QCheckBox*, 10> key_checks;
@@ -110,7 +117,15 @@ private:
     //尝试执行某个按键
     void tryPressKey(HWND window, int key_index, bool force);
     //执行某个按键
-    void pressKey(HWND window, UINT code);
+    bool pressKey(HWND window, UINT code);
+    bool sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode);
+    bool sendLegacyWindowKey(HWND window, UINT code, int method, DWORD* errorCode);
+
+    //调试日志
+    QString getLogPath() const;
+    void writeLog(const QString& message);
+    void showLogWindow();
+    QString currentSendMethodName() const;
 
     //截取游戏窗口的某个区域
     static QImage getGamePicture(HWND window, QRect rect);

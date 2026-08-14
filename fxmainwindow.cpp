@@ -7,10 +7,11 @@
 #include <QPainter>
 #include <QCryptographicHash>
 #include <QApplication>
-#include <QButtonGroup>
-#include <Psapi.h>
-#pragma comment(lib, "psapi.lib")
-
+#include <QDateTime>
+#include <QDialog>
+#include <QTextEdit>
+#include <QTextCursor>
+#include <QTextStream>
 //角色名取样区域
 static const QRect playerNameRect{ 80,22,90,14 };
 
@@ -43,6 +44,8 @@ FxMainWindow::FxMainWindow(QWidget* parent)
     //读取参数
     loadConfig();
 
+    writeLog(QStringLiteral("程序启动，按键发送方式：%1").arg(currentSendMethodName()));
+
     //扫描游戏窗口
     scanGameWindows();
 
@@ -57,6 +60,7 @@ FxMainWindow::~FxMainWindow()
 {
     pressTimer.stop();
 
+    writeLog(QStringLiteral("程序退出，保存配置"));
     autoWriteConfig();
 }
 
@@ -143,19 +147,30 @@ void FxMainWindow::scanGameWindows()
     combo_windows->clear();
     check_global_switch->setChecked(false);
 
-    HWND hWindow = FindWindowW(L"QQSwordWinClass", nullptr); //暂不知道是不是FO/FFO独有类名
-
     combo_windows->blockSignals(true);
+
+    HWND hWindow = FindWindowW(L"QQSwordWinClass", nullptr);
 
     while (hWindow != nullptr)
     {
+        wchar_t title[512] = {};
+        wchar_t className[256] = {};
+        GetWindowTextW(hWindow, title, 512);
+        GetClassNameW(hWindow, className, 256);
+
         DWORD pid;
         GetWindowThreadProcessId(hWindow, &pid);
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
-        GetProcessImageFileNameW(hProcess, c_string, 512);
-        CloseHandle(hProcess);
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        DWORD pathLength = 512;
+        const bool gotProcessPath = hProcess &&
+            QueryFullProcessImageNameW(hProcess, 0, c_string, &pathLength) != FALSE;
+        if (hProcess)
+            CloseHandle(hProcess);
 
-        if (QString::fromWCharArray(c_string).endsWith(QStringLiteral("\\qqffo.exe"))) //此处要跟FO区分，不区分则两游戏通用。
+        const bool currentProcessMatch = gotProcessPath &&
+            QString::fromWCharArray(c_string, pathLength).endsWith(QStringLiteral("\\qqffo.exe"), Qt::CaseInsensitive);
+
+        if (currentProcessMatch)
         {
             QImage playerNameImage = getGamePicture(hWindow, playerNameRect);
 
@@ -166,10 +181,17 @@ void FxMainWindow::scanGameWindows()
                 playerNameHashes.push_back(imageHash(playerNameImage));
                 playerNameImages.push_back(playerNameImage);
                 combo_windows->addItem(QIcon(QPixmap::fromImage(playerNameImage)), nullptr);
+
+                writeLog(QStringLiteral("扫描命中：handle=0x%1, pid=%2, class=%3, title=%4")
+                    .arg(reinterpret_cast<quintptr>(hWindow), 0, 16).arg(pid)
+                    .arg(QString::fromWCharArray(className), QString::fromWCharArray(title)));
             }
             else
             {
                 ++invalid;
+                writeLog(QStringLiteral("扫描排除不可截图窗口：handle=0x%1, pid=%2, minimized=%3, title=%4")
+                    .arg(reinterpret_cast<quintptr>(hWindow), 0, 16).arg(pid)
+                    .arg(IsIconic(hWindow) != FALSE).arg(QString::fromWCharArray(title)));
             }
         }
 
@@ -177,6 +199,8 @@ void FxMainWindow::scanGameWindows()
     }
 
     combo_windows->blockSignals(false);
+    writeLog(QStringLiteral("扫描窗口完成：新版窗口类+进程方式，找到 %1 个窗口，%2 个窗口无法截图")
+        .arg(found).arg(invalid));
 }
 
 void FxMainWindow::changeWindowTitle()
@@ -210,14 +234,226 @@ void FxMainWindow::tryPressKey(HWND window, int key_index, bool force)
         lastPressedTimePoint[key_index] = nowTimePoint;
         lastAnyPressedTimePoint = nowTimePoint;
 
-        pressKey(window, VK_F1 + key_index);
+        bool sent = pressKey(window, VK_F1 + key_index);
+        writeLog(QStringLiteral("触发 F%1：%2").arg(key_index + 1).arg(sent ? QStringLiteral("发送成功") : QStringLiteral("发送失败")));
     }
 }
 
-void FxMainWindow::pressKey(HWND window, UINT code)
+bool FxMainWindow::pressKey(HWND window, UINT code)
 {
-    PostMessageA(window, WM_KEYDOWN, code, 0);
-    PostMessageA(window, WM_KEYUP, code, 0);
+    if (!IsWindow(window))
+    {
+        writeLog(QStringLiteral("发送失败：窗口句柄已失效，handle=0x%1")
+            .arg(reinterpret_cast<quintptr>(window), 0, 16));
+        return false;
+    }
+
+    const int method = combo_send_method->currentData().toInt();
+    if (method >= 8)
+    {
+        DWORD errorCode = ERROR_SUCCESS;
+        const bool result = sendLegacyWindowKey(window, code, method, &errorCode);
+        wchar_t title[512] = {};
+        wchar_t className[256] = {};
+        GetWindowTextW(window, title, 512);
+        GetClassNameW(window, className, 256);
+        writeLog(QStringLiteral("旧版窗口消息：method=%1, vk=0x%2, target=0x%3, class=%4, title=%5, foreground=%6, ok=%7, error=%8")
+            .arg(currentSendMethodName()).arg(code, 0, 16)
+            .arg(reinterpret_cast<quintptr>(window), 0, 16)
+            .arg(QString::fromWCharArray(className), QString::fromWCharArray(title))
+            .arg(GetForegroundWindow() == window).arg(result).arg(errorCode));
+        return result;
+    }
+
+    const bool autoActivateWindow = method >= 4;
+    if (autoActivateWindow && GetForegroundWindow() != window)
+    {
+        if (IsIconic(window))
+            ShowWindow(window, SW_RESTORE);
+        SetForegroundWindow(window);
+    }
+
+    if (GetForegroundWindow() != window)
+    {
+        writeLog(QStringLiteral("全局输入已取消：游戏窗口不在前台，handle=0x%1, method=%2")
+            .arg(reinterpret_cast<quintptr>(window), 0, 16)
+            .arg(currentSendMethodName()));
+        return false;
+    }
+
+    const UINT scanCode = MapVirtualKeyW(code, MAPVK_VK_TO_VSC);
+    const bool foreground = GetForegroundWindow() == window;
+    DWORD errorCode = ERROR_SUCCESS;
+
+    const bool downOk = sendGlobalKey(false, code, method, &errorCode);
+    writeLog(QStringLiteral("按键按下：method=%1, vk=0x%2, scan=0x%3, window=0x%4, foreground=%5, ok=%6, error=%7")
+        .arg(currentSendMethodName())
+        .arg(code, 0, 16).arg(scanCode, 0, 16)
+        .arg(reinterpret_cast<quintptr>(window), 0, 16)
+        .arg(foreground).arg(downOk).arg(errorCode));
+
+    const int holdMilliseconds = qRound(spin_key_hold_interval->value() * 1000.0);
+    QTimer::singleShot(holdMilliseconds, this,
+        [this, code, method]() {
+            DWORD upError = ERROR_SUCCESS;
+            const bool upOk = sendGlobalKey(true, code, method, &upError);
+            writeLog(QStringLiteral("按键释放：method=%1, vk=0x%2, ok=%3, error=%4")
+                .arg(currentSendMethodName())
+                .arg(code, 0, 16).arg(upOk).arg(upError));
+        });
+    return downOk;
+}
+
+bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD* errorCode)
+{
+    HWND target = window;
+#if 0
+    // 已隐藏的实验实现保留在源码中，但不编入发布版，减少无用敏感 API 特征。
+    if (method == 11 || method == 12)
+    {
+        HWND child = GetTopWindow(window);
+        if (child)
+            target = child;
+    }
+#else
+    Q_UNUSED(method);
+#endif
+
+    SetLastError(ERROR_SUCCESS);
+    bool result = true;
+#if 0
+    const LPARAM point = MAKELPARAM(50, 50);
+
+    // 9/12 精确复现旧版的可选右键按下；10 尝试完整右键点击。
+    if (method == 9 || method == 12)
+        result = PostMessageA(target, WM_RBUTTONDOWN, MK_RBUTTON, point) != FALSE;
+    else if (method == 10)
+    {
+        result = PostMessageA(target, WM_RBUTTONDOWN, MK_RBUTTON, point) != FALSE;
+        result = (PostMessageA(target, WM_RBUTTONUP, 0, point) != FALSE) && result;
+    }
+#endif
+
+    bool keyResult = false;
+#if 0
+    if (method == 13)
+        keyResult = SendNotifyMessageA(target, WM_KEYUP, code, 0) != FALSE;
+    else
+#endif
+        keyResult = PostMessageA(target, WM_KEYUP, code, 0) != FALSE;
+
+    result = result && keyResult;
+    if (!result)
+        *errorCode = GetLastError();
+
+    writeLog(QStringLiteral("旧版消息目标：top=0x%1, actual=0x%2, msg=WM_KEYUP, wParam=0x%3, lParam=0")
+        .arg(reinterpret_cast<quintptr>(window), 0, 16)
+        .arg(reinterpret_cast<quintptr>(target), 0, 16).arg(code, 0, 16));
+    return result;
+}
+
+bool FxMainWindow::sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode)
+{
+    SetLastError(ERROR_SUCCESS);
+    bool result = false;
+    switch (method)
+    {
+    case 0: case 4:
+    {
+        INPUT input = {};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = static_cast<WORD>(code);
+        input.ki.dwFlags = keyUp ? KEYEVENTF_KEYUP : 0;
+        result = SendInput(1, &input, sizeof(input)) == 1;
+        break;
+    }
+#if 0
+    // 其他下拉选项对应的实现暂不编译，需要恢复选项时可重新启用。
+    case 1: case 5:
+    {
+        INPUT input = {};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(code, MAPVK_VK_TO_VSC));
+        input.ki.dwFlags = KEYEVENTF_SCANCODE | (keyUp ? KEYEVENTF_KEYUP : 0);
+        result = SendInput(1, &input, sizeof(input)) == 1;
+        break;
+    }
+    case 2: case 3: case 6: case 7:
+    {
+        const bool scanOnly = method == 3 || method == 7;
+        const BYTE scanCode = static_cast<BYTE>(MapVirtualKeyW(static_cast<UINT>(code), MAPVK_VK_TO_VSC));
+        const DWORD flags = keyUp ? KEYEVENTF_KEYUP : 0;
+        keybd_event(scanOnly ? 0 : static_cast<BYTE>(code), scanCode, flags, 0);
+        result = true;
+        break;
+    }
+#endif
+    default:
+        *errorCode = ERROR_INVALID_PARAMETER;
+        return false;
+    }
+
+    if (!result)
+        *errorCode = GetLastError();
+    return result;
+}
+
+QString FxMainWindow::getLogPath() const
+{
+    return QCoreApplication::applicationDirPath() + QStringLiteral("/fxpresser-debug.log");
+}
+
+QString FxMainWindow::currentSendMethodName() const
+{
+    return combo_send_method->currentText();
+}
+
+void FxMainWindow::writeLog(const QString& message)
+{
+    QFile file(getLogPath());
+    if (!file.open(QIODevice::Text | QIODevice::WriteOnly | QIODevice::Append))
+        return;
+
+    QTextStream stream(&file);
+    stream.setCodec("UTF-8");
+    stream << QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))
+           << QStringLiteral("  ") << message << '\n';
+}
+
+void FxMainWindow::showLogWindow()
+{
+    auto dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("FxPresser 调试日志"));
+    dialog->resize(900, 520);
+
+    auto layout = new QVBoxLayout(dialog);
+    auto pathLabel = new QLabel(getLogPath(), dialog);
+    pathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto text = new QTextEdit(dialog);
+    text->setReadOnly(true);
+
+    QFile file(getLogPath());
+    if (file.open(QIODevice::Text | QIODevice::ReadOnly))
+        text->setPlainText(QString::fromUtf8(file.readAll()));
+    else
+        text->setPlainText(QStringLiteral("日志文件尚未生成或无法读取。"));
+    text->moveCursor(QTextCursor::End);
+
+    auto refresh = new QPushButton(QStringLiteral("刷新"), dialog);
+    connect(refresh, &QPushButton::clicked, [this, text]() {
+        QFile currentFile(getLogPath());
+        if (currentFile.open(QIODevice::Text | QIODevice::ReadOnly))
+        {
+            text->setPlainText(QString::fromUtf8(currentFile.readAll()));
+            text->moveCursor(QTextCursor::End);
+        }
+    });
+
+    layout->addWidget(pathLabel);
+    layout->addWidget(text, 1);
+    layout->addWidget(refresh);
+    dialog->show();
 }
 
 QImage FxMainWindow::getGamePicture(HWND window, QRect rect)
@@ -332,6 +568,8 @@ SConfigData FxMainWindow::makeConfigFromUI()
 
     result.globalInterval = spin_global_interval->value();
     result.defaultKey = currentDefaultKey;
+    result.sendMethod = combo_send_method->currentIndex();
+    result.keyHoldInterval = spin_key_hold_interval->value();
 
     result.hash = currentHash;
     result.title = line_title->text();
@@ -353,6 +591,8 @@ void FxMainWindow::applyConfigToUI(const SConfigData& config)
     }
 
     spin_global_interval->setValue(config.globalInterval);
+    combo_send_method->setCurrentIndex(qBound(0, config.sendMethod, combo_send_method->count() - 1));
+    spin_key_hold_interval->setValue(config.keyHoldInterval);
 
     currentDefaultKey = config.defaultKey;
     for (int index = 0; index < 10; ++index)
@@ -393,6 +633,8 @@ QJsonObject FxMainWindow::configToJson(const SConfigData& config)
 
     result["Interval"] = config.globalInterval;
     result["DefaultKey"] = config.defaultKey;
+    result["SendMethod"] = config.sendMethod;
+    result["KeyHoldInterval"] = config.keyHoldInterval;
 
     result["X"] = config.x;
     result["Y"] = config.y;
@@ -423,6 +665,8 @@ SConfigData FxMainWindow::jsonToConfig(QJsonObject json)
 
     result.globalInterval = json.take("Interval").toDouble(0.8);
     result.defaultKey = json.take("DefaultKey").toInt(-1);
+    result.sendMethod = json.take("SendMethod").toInt(2);
+    result.keyHoldInterval = json.take("KeyHoldInterval").toDouble(0.1);
 
     result.x = json.take("X").toInt(-1);
     result.y = json.take("Y").toInt(-1);
@@ -521,6 +765,48 @@ void FxMainWindow::setupUI()
         });
     vlayout_main->addWidget(btn_switch_to_window);
 
+    auto hlayout_send_method = new QHBoxLayout;
+    combo_send_method = new QComboBox;
+    combo_send_method->addItem(QStringLiteral("键盘+自动窗口"), 4);
+    combo_send_method->addItem(QStringLiteral("键盘+手动窗口"), 0);
+    combo_send_method->addItem(QStringLiteral("按键消息"), 8);
+
+    // 以下实验方式保留实现，仅从界面下拉框隐藏，后续需要时可直接恢复。
+    // combo_send_method->addItem(QStringLiteral("SendInput / 扫描码 / 手动保持前台"), 1);
+    // combo_send_method->addItem(QStringLiteral("keybd_event / VK / 手动保持前台"), 2);
+    // combo_send_method->addItem(QStringLiteral("keybd_event / 扫描码 / 手动保持前台"), 3);
+    // combo_send_method->addItem(QStringLiteral("SendInput / 扫描码 / 自动切换前台"), 5);
+    // combo_send_method->addItem(QStringLiteral("keybd_event / VK / 自动切换前台"), 6);
+    // combo_send_method->addItem(QStringLiteral("keybd_event / 扫描码 / 自动切换前台"), 7);
+    // combo_send_method->addItem(QStringLiteral("旧版：右键按下 + KEYUP"), 9);
+    // combo_send_method->addItem(QStringLiteral("完整右键点击 + KEYUP"), 10);
+    // combo_send_method->addItem(QStringLiteral("首个子窗口 / 仅 KEYUP"), 11);
+    // combo_send_method->addItem(QStringLiteral("首个子窗口 / 右键按下 + KEYUP"), 12);
+    // combo_send_method->addItem(QStringLiteral("SendNotifyMessageA / 仅 KEYUP"), 13);
+    combo_send_method->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    combo_send_method->setMinimumContentsLength(0);
+    combo_send_method->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    connect(combo_send_method, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+        [this](int) {
+            writeLog(QStringLiteral("切换按键发送方式：%1").arg(currentSendMethodName()));
+        });
+    hlayout_send_method->addWidget(new QLabel(QStringLiteral("按键方式")));
+    hlayout_send_method->addWidget(combo_send_method, 1);
+    vlayout_main->addLayout(hlayout_send_method);
+
+    spin_key_hold_interval = new QDoubleSpinBox;
+    spin_key_hold_interval->setSuffix(QStringLiteral(" s"));
+    spin_key_hold_interval->setDecimals(2);
+    spin_key_hold_interval->setMinimum(0.01);
+    spin_key_hold_interval->setMaximum(5.0);
+    spin_key_hold_interval->setSingleStep(0.01);
+    spin_key_hold_interval->setValue(0.1);
+    auto hlayout_key_hold = new QHBoxLayout;
+    hlayout_key_hold->addWidget(new QLabel(QStringLiteral("释放间隔")));
+    hlayout_key_hold->addWidget(spin_key_hold_interval);
+    hlayout_key_hold->addStretch();
+    vlayout_main->addLayout(hlayout_key_hold);
+
     vlayout_main->addWidget(get_h_line());
 
     check_global_switch = new QCheckBox(QStringLiteral("全局开关"));
@@ -531,7 +817,17 @@ void FxMainWindow::setupUI()
             {
                 defaultKeyTriggered = false;
                 resetAllTimeStamps();
+
+                const int windowIndex = combo_windows->currentIndex();
+                if (windowIndex == -1)
+                    writeLog(QStringLiteral("全局开关已开启，但尚未选择有效游戏窗口"));
+                else
+                    writeLog(QStringLiteral("全局开关已开启：handle=0x%1, method=%2")
+                        .arg(reinterpret_cast<quintptr>(gameWindows[windowIndex]), 0, 16)
+                        .arg(currentSendMethodName()));
             }
+            else
+                writeLog(QStringLiteral("全局开关已关闭"));
         });
     auto hlayout_switch = new QHBoxLayout;
     hlayout_switch->addStretch();
@@ -557,7 +853,7 @@ void FxMainWindow::setupUI()
     auto gridlayout_keys = new QGridLayout;
     gridlayout_keys->addWidget(new QLabel(QStringLiteral("启用")), 0, 0);
     gridlayout_keys->addWidget(new QLabel(QStringLiteral("间隔")), 0, 1);
-    gridlayout_keys->addWidget(new QLabel(QStringLiteral("是缺省技能")), 0, 2);
+    gridlayout_keys->addWidget(new QLabel(QStringLiteral("缺省")), 0, 2);
 
     for (int index = 0; index < 10; ++index)
     {
@@ -607,7 +903,15 @@ void FxMainWindow::setupUI()
 
     vlayout_main->addLayout(gridlayout_keys);
 
+    btn_show_log = new QPushButton(QStringLiteral("查看调试日志"));
+    connect(btn_show_log, &QPushButton::clicked, this, &FxMainWindow::showLogWindow);
+    vlayout_main->addWidget(btn_show_log);
+
     main_widget->setLayout(vlayout_main);
     this->setCentralWidget(main_widget);
-    this->setFixedSize(minimumSize());
+    // 高度固定；宽度默认及最大为 200px，并允许用户向更窄方向手动调节。
+    this->setMinimumWidth(160);
+    this->setMaximumWidth(200);
+    this->setFixedHeight(minimumSizeHint().height());
+    this->resize(200, height());
 }
