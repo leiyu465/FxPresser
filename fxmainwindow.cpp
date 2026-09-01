@@ -107,16 +107,12 @@ void FxMainWindow::pressProc()
     }
 
     HWND gameWindow = gameWindows[window_index];
-    if (!ensureGameWindowValid(gameWindow))
-        return;
 
     if (currentDefaultKey != -1 && !defaultKeyTriggered && key_checks[currentDefaultKey]->isChecked())
     {
         tryPressKey(gameWindow, currentDefaultKey, true);
         defaultKeyTriggered = true;
 
-        if (!check_global_switch->isChecked())
-            return;
     }
 
     //每轮从上次成功按键的下一个位置开始，并且最多触发一个按键。
@@ -260,9 +256,6 @@ bool FxMainWindow::tryPressKey(HWND window, int key_index, bool force)
 
 bool FxMainWindow::pressKey(HWND window, UINT code)
 {
-    if (!ensureGameWindowValid(window))
-        return false;
-
     const int method = combo_send_method->currentData().toInt();
     if (method >= 8)
     {
@@ -277,8 +270,6 @@ bool FxMainWindow::pressKey(HWND window, UINT code)
             .arg(reinterpret_cast<quintptr>(window), 0, 16)
             .arg(QString::fromWCharArray(className), QString::fromWCharArray(title))
             .arg(GetForegroundWindow() == window).arg(result).arg(errorCode));
-        if (!result && !ensureGameWindowValid(window))
-            return false;
         return result;
     }
 
@@ -879,16 +870,26 @@ void FxMainWindow::setupUI()
         {
             if (checked)
             {
+                const int windowIndex = combo_windows->currentIndex();
+                if (windowIndex == -1)
+                {
+                    check_global_switch->setChecked(false);
+                    QMessageBox::warning(this,
+                        QStringLiteral("尚未选择游戏窗口"),
+                        QStringLiteral("请先点击“扫描游戏窗口”并选择窗口，然后再开启全局开关。"));
+                    return;
+                }
+
+                // 仅在开启全局开关时检查一次，定时发送路径不重复调用 IsWindow()。
+                if (!ensureGameWindowValid(gameWindows[windowIndex]))
+                    return;
+
                 defaultKeyTriggered = false;
                 resetAllTimeStamps();
 
-                const int windowIndex = combo_windows->currentIndex();
-                if (windowIndex == -1)
-                    writeLog(QStringLiteral("全局开关已开启，但尚未选择有效游戏窗口"));
-                else
-                    writeLog(QStringLiteral("全局开关已开启：handle=0x%1, method=%2")
-                        .arg(reinterpret_cast<quintptr>(gameWindows[windowIndex]), 0, 16)
-                        .arg(currentSendMethodName()));
+                writeLog(QStringLiteral("全局开关已开启：handle=0x%1, method=%2")
+                    .arg(reinterpret_cast<quintptr>(gameWindows[windowIndex]), 0, 16)
+                    .arg(currentSendMethodName()));
             }
             else
                 writeLog(QStringLiteral("全局开关已关闭"));
