@@ -11,6 +11,7 @@
 #include <QDialog>
 #include <QTextEdit>
 #include <QTextCursor>
+#include <QToolButton>
 //角色名取样区域
 static const QRect playerNameRect{ 80,22,90,14 };
 
@@ -720,6 +721,17 @@ void FxMainWindow::setupUI()
         return line;
     };
 
+    auto makeHelpButton = [this](const QString& title, const QString& description) {
+        auto button = new QToolButton;
+        button->setText(QStringLiteral("?"));
+        button->setFixedSize(18, 18);
+        button->setToolTip(QStringLiteral("点击查看计算逻辑"));
+        connect(button, &QToolButton::clicked, this, [this, title, description]() {
+            QMessageBox::information(this, title, description);
+        });
+        return button;
+    };
+
     QFont switch_font;
     switch_font.setFamily(QStringLiteral("微软雅黑"));
     switch_font.setPointSize(20);
@@ -821,6 +833,11 @@ void FxMainWindow::setupUI()
     spin_key_hold_interval->setValue(0.1);
     auto hlayout_key_hold = new QHBoxLayout;
     hlayout_key_hold->addWidget(new QLabel(QStringLiteral("释放间隔")));
+    hlayout_key_hold->addWidget(makeHelpButton(
+        QStringLiteral("释放间隔计算逻辑"),
+        QStringLiteral("键盘方式会先发送按下，再等待该时间，最后发送释放。\n\n"
+                       "计算：释放时间 = 按下时间 + 释放间隔。\n\n"
+                       "“按键消息”方式只发送旧版的 KEYUP 消息，因此不使用此间隔。")));
     hlayout_key_hold->addWidget(spin_key_hold_interval);
     hlayout_key_hold->addStretch();
     vlayout_main->addLayout(hlayout_key_hold);
@@ -863,6 +880,11 @@ void FxMainWindow::setupUI()
     auto hlayout_press_interval = new QHBoxLayout;
     hlayout_press_interval->addStretch();
     hlayout_press_interval->addWidget(new QLabel(QStringLiteral("全局间隔")));
+    hlayout_press_interval->addWidget(makeHelpButton(
+        QStringLiteral("全局间隔计算逻辑"),
+        QStringLiteral("表示任意两个按键触发之间的最短等待时间。\n\n"
+                       "允许下一个按键的时间 = 上一个任意按键的触发时间 + 全局间隔。\n\n"
+                       "如果多个按键同时到期，每次只触发一个；等待全局间隔后，再按公平轮询顺序选择下一个。")));
     hlayout_press_interval->addWidget(spin_global_interval);
     hlayout_press_interval->addStretch();
     vlayout_main->addLayout(hlayout_press_interval);
@@ -870,7 +892,17 @@ void FxMainWindow::setupUI()
 
     auto gridlayout_keys = new QGridLayout;
     gridlayout_keys->addWidget(new QLabel(QStringLiteral("启用")), 0, 0);
-    gridlayout_keys->addWidget(new QLabel(QStringLiteral("间隔")), 0, 1);
+    auto keyIntervalHeader = new QWidget;
+    auto keyIntervalHeaderLayout = new QHBoxLayout(keyIntervalHeader);
+    keyIntervalHeaderLayout->setContentsMargins(0, 0, 0, 0);
+    keyIntervalHeaderLayout->setSpacing(2);
+    keyIntervalHeaderLayout->addWidget(new QLabel(QStringLiteral("间隔")));
+    keyIntervalHeaderLayout->addWidget(makeHelpButton(
+        QStringLiteral("单键间隔计算逻辑"),
+        QStringLiteral("表示同一个按键两次触发之间的最短时间。\n\n"
+                       "按键可触发条件：单键间隔已到，并且全局间隔也已到。\n\n"
+                       "启用多个按键时还需要排队，所以实际周期可能大于这里设置的时间。缺省技能只在开启全局开关时触发一次。")));
+    gridlayout_keys->addWidget(keyIntervalHeader, 0, 1);
     gridlayout_keys->addWidget(new QLabel(QStringLiteral("缺省")), 0, 2);
 
     for (int index = 0; index < 10; ++index)
