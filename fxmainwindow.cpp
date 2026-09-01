@@ -106,10 +106,17 @@ void FxMainWindow::pressProc()
         return;
     }
 
+    HWND gameWindow = gameWindows[window_index];
+    if (!ensureGameWindowValid(gameWindow))
+        return;
+
     if (currentDefaultKey != -1 && !defaultKeyTriggered && key_checks[currentDefaultKey]->isChecked())
     {
-        tryPressKey(gameWindows[window_index], currentDefaultKey, true);
+        tryPressKey(gameWindow, currentDefaultKey, true);
         defaultKeyTriggered = true;
+
+        if (!check_global_switch->isChecked())
+            return;
     }
 
     //每轮从上次成功按键的下一个位置开始，并且最多触发一个按键。
@@ -123,7 +130,7 @@ void FxMainWindow::pressProc()
             continue;
         }
 
-        if (tryPressKey(gameWindows[window_index], key_index, false))
+        if (tryPressKey(gameWindow, key_index, false))
         {
             nextKeyIndex = (key_index + 1) % 10;
             break;
@@ -253,12 +260,8 @@ bool FxMainWindow::tryPressKey(HWND window, int key_index, bool force)
 
 bool FxMainWindow::pressKey(HWND window, UINT code)
 {
-    if (!IsWindow(window))
-    {
-        writeLog(QStringLiteral("发送失败：窗口句柄已失效，handle=0x%1")
-            .arg(reinterpret_cast<quintptr>(window), 0, 16));
+    if (!ensureGameWindowValid(window))
         return false;
-    }
 
     const int method = combo_send_method->currentData().toInt();
     if (method >= 8)
@@ -274,6 +277,8 @@ bool FxMainWindow::pressKey(HWND window, UINT code)
             .arg(reinterpret_cast<quintptr>(window), 0, 16)
             .arg(QString::fromWCharArray(className), QString::fromWCharArray(title))
             .arg(GetForegroundWindow() == window).arg(result).arg(errorCode));
+        if (!result && !ensureGameWindowValid(window))
+            return false;
         return result;
     }
 
@@ -314,6 +319,30 @@ bool FxMainWindow::pressKey(HWND window, UINT code)
                 .arg(code, 0, 16).arg(upOk).arg(upError));
         });
     return downOk;
+}
+
+bool FxMainWindow::ensureGameWindowValid(HWND window)
+{
+    if (IsWindow(window))
+        return true;
+
+    writeLog(QStringLiteral("游戏窗口已失效：handle=0x%1，自动关闭全局开关")
+        .arg(reinterpret_cast<quintptr>(window), 0, 16));
+
+    // setChecked(false) 同步触发关闭逻辑；只有原本开启时才提示，
+    // 避免定时器或重复失败产生多个弹窗。
+    const bool wasEnabled = check_global_switch->isChecked();
+    if (wasEnabled)
+        check_global_switch->setChecked(false);
+
+    if (wasEnabled)
+    {
+        QMessageBox::warning(this,
+            QStringLiteral("游戏窗口已关闭"),
+            QStringLiteral("当前选择的游戏窗口已经不存在，全局开关已自动关闭。\n\n"
+                           "请点击“扫描游戏窗口”，重新扫描并选择窗口后再开启。"));
+    }
+    return false;
 }
 
 bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD* errorCode)

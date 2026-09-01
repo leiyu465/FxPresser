@@ -123,6 +123,7 @@ private:
     bool tryPressKey(HWND window, int key_index, bool force);
     //执行某个按键
     bool pressKey(HWND window, UINT code);
+    bool ensureGameWindowValid(HWND window);
     bool sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode);
     bool sendLegacyWindowKey(HWND window, UINT code, int method, DWORD* errorCode);
 
