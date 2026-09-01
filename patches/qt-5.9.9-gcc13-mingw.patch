@@ -1,31 +1,14 @@
 diff --git a/src/corelib/tools/qbytearraymatcher.h b/src/corelib/tools/qbytearraymatcher.h
 --- a/src/corelib/tools/qbytearraymatcher.h
 +++ b/src/corelib/tools/qbytearraymatcher.h
-@@ -42,6 +42,7 @@
- #define QBYTEARRAYMATCHER_H
- 
- #include <QtCore/qbytearray.h>
+@@ -44,0 +45 @@
 +#include <limits>
- 
- QT_BEGIN_NAMESPACE
- 
 diff --git a/src/plugins/platforms/windows/qwindowsmousehandler.cpp b/src/plugins/platforms/windows/qwindowsmousehandler.cpp
 --- a/src/plugins/platforms/windows/qwindowsmousehandler.cpp
 +++ b/src/plugins/platforms/windows/qwindowsmousehandler.cpp
-@@ -59,7 +59,7 @@
-  * are present in the Windows SDK's, but not in older MSVC Express
-  * versions. */
- 
+@@ -62 +62 @@
 -#if defined(Q_CC_MINGW) || !defined(TOUCHEVENTF_MOVE)
 +#if !defined(TOUCHEVENTF_MOVE)
- 
- typedef struct tagTOUCHINPUT {
-     LONG x;
-@@ -86,7 +86,7 @@ typedef TOUCHINPUT const * PCTOUCHINPUT;
- #  define TOUCHINPUTMASKF_CONTACTAREA 0x0004
- #  define TOUCHINPUTMASKF_EXTRAINFO 0x0002
+@@ -89 +89 @@
 -#endif // if defined(Q_CC_MINGW) || !defined(TOUCHEVENTF_MOVE)
 +#endif // !defined(TOUCHEVENTF_MOVE)
- 
- QT_BEGIN_NAMESPACE
-

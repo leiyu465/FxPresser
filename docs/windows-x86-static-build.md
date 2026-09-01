@@ -134,4 +134,3 @@ Qt Core、Gui、Widgets、Windows 平台插件和 C/C++ 运行时都在同一个
 ### 是否可以用 UPX 继续压缩？
 
 不建议。UPX 可能提高杀毒软件启发式误报率。发布时使用 ZIP 压缩即可。
-
