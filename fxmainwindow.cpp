@@ -876,7 +876,7 @@ void FxMainWindow::setupUI()
     spin_global_interval->setMinimum(0.1);
     spin_global_interval->setMaximum(365.0);
     spin_global_interval->setSingleStep(0.01);
-    spin_global_interval->setValue(0.8);
+    spin_global_interval->setValue(0.1);
     auto hlayout_press_interval = new QHBoxLayout;
     hlayout_press_interval->addStretch();
     hlayout_press_interval->addWidget(new QLabel(QStringLiteral("全局间隔")));
