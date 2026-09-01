@@ -11,7 +11,6 @@
 #include <QDialog>
 #include <QTextEdit>
 #include <QTextCursor>
-#include <QTextStream>
 //角色名取样区域
 static const QRect playerNameRect{ 80,22,90,14 };
 
@@ -112,14 +111,22 @@ void FxMainWindow::pressProc()
         defaultKeyTriggered = true;
     }
 
-    for (int key_index = 0; key_index < 10; ++key_index)
+    //每轮从上次成功按键的下一个位置开始，并且最多触发一个按键。
+    //旧逻辑固定从F1开始扫描，前面的按键会不断刷新全局时间戳，
+    //使后面的按键在部分间隔组合下永久没有触发机会。
+    for (int offset = 0; offset < 10; ++offset)
     {
+        const int key_index = (nextKeyIndex + offset) % 10;
         if (key_index == currentDefaultKey || !key_checks[key_index]->isChecked())
         {
             continue;
         }
 
-        tryPressKey(gameWindows[window_index], key_index, false);
+        if (tryPressKey(gameWindows[window_index], key_index, false))
+        {
+            nextKeyIndex = (key_index + 1) % 10;
+            break;
+        }
     }
 }
 
@@ -133,6 +140,7 @@ void FxMainWindow::resetAllTimeStamps()
     //为了实现点击全局开关时自动触发一次，此处将每个按键的上次时间设为0
     lastPressedTimePoint.fill(std::chrono::steady_clock::time_point());
     lastAnyPressedTimePoint = std::chrono::steady_clock::time_point();
+    nextKeyIndex = 0;
 }
 
 void FxMainWindow::scanGameWindows()
@@ -220,7 +228,7 @@ void FxMainWindow::changeWindowTitle()
     }
 }
 
-void FxMainWindow::tryPressKey(HWND window, int key_index, bool force)
+bool FxMainWindow::tryPressKey(HWND window, int key_index, bool force)
 {
     auto nowTimePoint = std::chrono::steady_clock::now();
 
@@ -236,7 +244,10 @@ void FxMainWindow::tryPressKey(HWND window, int key_index, bool force)
 
         bool sent = pressKey(window, VK_F1 + key_index);
         writeLog(QStringLiteral("触发 F%1：%2").arg(key_index + 1).arg(sent ? QStringLiteral("发送成功") : QStringLiteral("发送失败")));
+        return true;
     }
+
+    return false;
 }
 
 bool FxMainWindow::pressKey(HWND window, UINT code)
@@ -398,11 +409,6 @@ bool FxMainWindow::sendGlobalKey(bool keyUp, UINT code, int method, DWORD* error
     return result;
 }
 
-QString FxMainWindow::getLogPath() const
-{
-    return QCoreApplication::applicationDirPath() + QStringLiteral("/fxpresser-debug.log");
-}
-
 QString FxMainWindow::currentSendMethodName() const
 {
     return combo_send_method->currentText();
@@ -410,50 +416,62 @@ QString FxMainWindow::currentSendMethodName() const
 
 void FxMainWindow::writeLog(const QString& message)
 {
-    QFile file(getLogPath());
-    if (!file.open(QIODevice::Text | QIODevice::WriteOnly | QIODevice::Append))
+    if (!logTextEdit)
         return;
 
-    QTextStream stream(&file);
-    stream.setCodec("UTF-8");
-    stream << QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))
-           << QStringLiteral("  ") << message << '\n';
+    logTextEdit->moveCursor(QTextCursor::End);
+    logTextEdit->insertPlainText(QStringLiteral("%1  %2\n")
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz")), message));
+    logTextEdit->ensureCursorVisible();
 }
 
 void FxMainWindow::showLogWindow()
 {
+    if (logTextEdit)
+    {
+        logTextEdit->window()->raise();
+        logTextEdit->window()->activateWindow();
+        return;
+    }
+
     auto dialog = new QDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(QStringLiteral("FxPresser 调试日志"));
     dialog->resize(900, 520);
 
     auto layout = new QVBoxLayout(dialog);
-    auto pathLabel = new QLabel(getLogPath(), dialog);
-    pathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     auto text = new QTextEdit(dialog);
     text->setReadOnly(true);
-
-    QFile file(getLogPath());
-    if (file.open(QIODevice::Text | QIODevice::ReadOnly))
-        text->setPlainText(QString::fromUtf8(file.readAll()));
-    else
-        text->setPlainText(QStringLiteral("日志文件尚未生成或无法读取。"));
-    text->moveCursor(QTextCursor::End);
-
-    auto refresh = new QPushButton(QStringLiteral("刷新"), dialog);
-    connect(refresh, &QPushButton::clicked, [this, text]() {
-        QFile currentFile(getLogPath());
-        if (currentFile.open(QIODevice::Text | QIODevice::ReadOnly))
-        {
-            text->setPlainText(QString::fromUtf8(currentFile.readAll()));
-            text->moveCursor(QTextCursor::End);
-        }
-    });
-
-    layout->addWidget(pathLabel);
+    logTextEdit = text;
     layout->addWidget(text, 1);
-    layout->addWidget(refresh);
     dialog->show();
+    writeLog(QStringLiteral("调试窗口已打开；仅显示打开期间的日志，关闭后立即销毁。"));
+    writeLog(QStringLiteral("当前设置：按键方式=%1，全局间隔=%2s，释放间隔=%3s")
+        .arg(currentSendMethodName())
+        .arg(spin_global_interval->value(), 0, 'f', 2)
+        .arg(spin_key_hold_interval->value(), 0, 'f', 2));
+
+    const int windowIndex = combo_windows->currentIndex();
+    if (windowIndex >= 0 && windowIndex < gameWindows.size())
+    {
+        writeLog(QStringLiteral("当前窗口：handle=0x%1")
+            .arg(reinterpret_cast<quintptr>(gameWindows[windowIndex]), 0, 16));
+    }
+    else
+    {
+        writeLog(QStringLiteral("当前窗口：未选择"));
+    }
+
+    for (int index = 0; index < 10; ++index)
+    {
+        if (key_checks[index]->isChecked())
+        {
+            writeLog(QStringLiteral("启用 F%1：间隔=%2s，缺省=%3")
+                .arg(index + 1)
+                .arg(key_intervals[index]->value(), 0, 'f', 1)
+                .arg(index == currentDefaultKey ? QStringLiteral("是") : QStringLiteral("否")));
+        }
+    }
 }
 
 QImage FxMainWindow::getGamePicture(HWND window, QRect rect)

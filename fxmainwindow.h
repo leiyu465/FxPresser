@@ -18,6 +18,9 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QJsonArray>
+#include <QPointer>
+
+class QTextEdit;
 
 #include <windows.h>
 
@@ -88,6 +91,8 @@ private:
     std::array<std::chrono::steady_clock::time_point, 10> lastPressedTimePoint;
     //最后一次按键的时间点，用于确定实际按键的时机
     std::chrono::steady_clock::time_point lastAnyPressedTimePoint;
+    //公平轮询的起始位置，避免固定从F1扫描导致后续按键长期无法触发
+    int nextKeyIndex = 0;
 
     //扫描到的游戏窗口数据
     QVector<HWND> gameWindows;
@@ -115,14 +120,14 @@ private:
     void changeWindowTitle();
 
     //尝试执行某个按键
-    void tryPressKey(HWND window, int key_index, bool force);
+    bool tryPressKey(HWND window, int key_index, bool force);
     //执行某个按键
     bool pressKey(HWND window, UINT code);
     bool sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode);
     bool sendLegacyWindowKey(HWND window, UINT code, int method, DWORD* errorCode);
 
-    //调试日志
-    QString getLogPath() const;
+    //调试日志仅在窗口打开期间存在，不写入任何文件
+    QPointer<QTextEdit> logTextEdit;
     void writeLog(const QString& message);
     void showLogWindow();
     QString currentSendMethodName() const;
