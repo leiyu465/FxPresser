@@ -1,4 +1,6 @@
 # FxPresser
+
+Windows 32 位静态单文件构建请参阅 [docs/windows-x86-static-build.md](docs/windows-x86-static-build.md)。
 这是一个在游戏中自动释放技能(按F1-F10)的程序，与目前广泛流传的"魔手"是同一类工具。
 
 ## 目的

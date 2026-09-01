@@ -1,6 +1,10 @@
 ﻿#include "fxmainwindow.h"
 
 #include <QApplication>
+#ifdef FX_STATIC_QT_WINDOWS
+#include <QtPlugin>
+Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin)
+#endif
 
 int main(int argc, char *argv[])
 {
