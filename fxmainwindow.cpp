@@ -265,7 +265,7 @@ bool FxMainWindow::pressKey(HWND window, UINT code)
         wchar_t className[256] = {};
         GetWindowTextW(window, title, 512);
         GetClassNameW(window, className, 256);
-        writeLog(QStringLiteral("旧版窗口消息：method=%1, vk=0x%2, target=0x%3, class=%4, title=%5, foreground=%6, ok=%7, error=%8")
+        writeLog(QStringLiteral("窗口消息：method=%1, vk=0x%2, target=0x%3, class=%4, title=%5, foreground=%6, ok=%7, error=%8")
             .arg(currentSendMethodName()).arg(code, 0, 16)
             .arg(reinterpret_cast<quintptr>(window), 0, 16)
             .arg(QString::fromWCharArray(className), QString::fromWCharArray(title))
@@ -347,12 +347,40 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
         if (child)
             target = child;
     }
-#else
-    Q_UNUSED(method);
 #endif
 
     SetLastError(ERROR_SUCCESS);
     bool result = true;
+
+    if (method == 14)
+    {
+        // LittleBee 的非注入回退序列：完整扫描码 lParam + DOWN/UP。
+        const UINT scanCode = MapVirtualKeyW(code, MAPVK_VK_TO_VSC);
+        const LPARAM downParam = static_cast<LPARAM>(1ULL | (static_cast<ULONGLONG>(scanCode) << 16));
+        const LPARAM upParam = static_cast<LPARAM>(static_cast<ULONGLONG>(downParam) |
+            (1ULL << 30) | (1ULL << 31));
+        const UINT downMessage = code == VK_F10 ? WM_SYSKEYDOWN : WM_KEYDOWN;
+        const UINT upMessage = code == VK_F10 ? WM_SYSKEYUP : WM_KEYUP;
+
+        const bool downOk = PostMessageA(target, downMessage, code, downParam) != FALSE;
+        const DWORD downError = downOk ? ERROR_SUCCESS : GetLastError();
+        const DWORD holdMilliseconds = 25 + (GetTickCount() % 5);
+        Sleep(holdMilliseconds);
+        const bool upOk = PostMessageA(target, upMessage, code, upParam) != FALSE;
+
+        result = downOk && upOk;
+        if (!result)
+            *errorCode = upOk ? downError : GetLastError();
+
+        writeLog(QStringLiteral("LittleBee消息：target=0x%1, down=0x%2, up=0x%3, vk=0x%4, scan=0x%5, hold=%6ms, downLParam=0x%7, upLParam=0x%8")
+            .arg(reinterpret_cast<quintptr>(target), 0, 16)
+            .arg(downMessage, 0, 16).arg(upMessage, 0, 16)
+            .arg(code, 0, 16).arg(scanCode, 0, 16).arg(holdMilliseconds)
+            .arg(static_cast<DWORD>(downParam), 0, 16)
+            .arg(static_cast<DWORD>(upParam), 0, 16));
+        return result;
+    }
+
 #if 0
     const LPARAM point = MAKELPARAM(50, 50);
 
@@ -819,7 +847,7 @@ void FxMainWindow::setupUI()
     combo_send_method = new QComboBox;
     combo_send_method->addItem(QStringLiteral("键盘+自动窗口"), 4);
     combo_send_method->addItem(QStringLiteral("键盘+手动窗口"), 0);
-    combo_send_method->addItem(QStringLiteral("按键消息"), 8);
+    combo_send_method->addItem(QStringLiteral("按键消息"), 14);
 
     // 以下实验方式保留实现，仅从界面下拉框隐藏，后续需要时可直接恢复。
     // combo_send_method->addItem(QStringLiteral("SendInput / 扫描码 / 手动保持前台"), 1);
@@ -833,6 +861,7 @@ void FxMainWindow::setupUI()
     // combo_send_method->addItem(QStringLiteral("首个子窗口 / 仅 KEYUP"), 11);
     // combo_send_method->addItem(QStringLiteral("首个子窗口 / 右键按下 + KEYUP"), 12);
     // combo_send_method->addItem(QStringLiteral("SendNotifyMessageA / 仅 KEYUP"), 13);
+    // combo_send_method->addItem(QStringLiteral("旧版 PostMessageA / 仅 KEYUP"), 8);
     combo_send_method->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     combo_send_method->setMinimumContentsLength(0);
     combo_send_method->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
@@ -857,7 +886,7 @@ void FxMainWindow::setupUI()
         QStringLiteral("释放间隔计算逻辑"),
         QStringLiteral("键盘方式会先发送按下，再等待该时间，最后发送释放。\n\n"
                        "计算：释放时间 = 按下时间 + 释放间隔。\n\n"
-                       "“按键消息”方式只发送旧版的 KEYUP 消息，因此不使用此间隔。")));
+                       "“按键消息”方式使用固定约25–29ms的消息间隔，因此不使用此设置。")));
     hlayout_key_hold->addWidget(spin_key_hold_interval);
     hlayout_key_hold->addStretch();
     vlayout_main->addLayout(hlayout_key_hold);
