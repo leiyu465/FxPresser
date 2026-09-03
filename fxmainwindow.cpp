@@ -359,8 +359,8 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
         const LPARAM downParam = static_cast<LPARAM>(1ULL | (static_cast<ULONGLONG>(scanCode) << 16));
         const LPARAM upParam = static_cast<LPARAM>(static_cast<ULONGLONG>(downParam) |
             (1ULL << 30) | (1ULL << 31));
-        const UINT downMessage = code == VK_F10 ? WM_SYSKEYDOWN : WM_KEYDOWN;
-        const UINT upMessage = code == VK_F10 ? WM_SYSKEYUP : WM_KEYUP;
+        const UINT downMessage = WM_SYSKEYDOWN;
+        const UINT upMessage = WM_SYSKEYUP;
 
         const bool downOk = PostMessageA(target, downMessage, code, downParam) != FALSE;
         const DWORD downError = downOk ? ERROR_SUCCESS : GetLastError();
@@ -848,6 +848,7 @@ void FxMainWindow::setupUI()
     combo_send_method->addItem(QStringLiteral("键盘+自动窗口"), 4);
     combo_send_method->addItem(QStringLiteral("键盘+手动窗口"), 0);
     combo_send_method->addItem(QStringLiteral("按键消息"), 14);
+    combo_send_method->addItem(QStringLiteral("keyup消息"), 8);
 
     // 以下实验方式保留实现，仅从界面下拉框隐藏，后续需要时可直接恢复。
     // combo_send_method->addItem(QStringLiteral("SendInput / 扫描码 / 手动保持前台"), 1);
@@ -861,7 +862,6 @@ void FxMainWindow::setupUI()
     // combo_send_method->addItem(QStringLiteral("首个子窗口 / 仅 KEYUP"), 11);
     // combo_send_method->addItem(QStringLiteral("首个子窗口 / 右键按下 + KEYUP"), 12);
     // combo_send_method->addItem(QStringLiteral("SendNotifyMessageA / 仅 KEYUP"), 13);
-    // combo_send_method->addItem(QStringLiteral("旧版 PostMessageA / 仅 KEYUP"), 8);
     combo_send_method->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     combo_send_method->setMinimumContentsLength(0);
     combo_send_method->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
@@ -886,7 +886,7 @@ void FxMainWindow::setupUI()
         QStringLiteral("释放间隔计算逻辑"),
         QStringLiteral("键盘方式会先发送按下，再等待该时间，最后发送释放。\n\n"
                        "计算：释放时间 = 按下时间 + 释放间隔。\n\n"
-                       "“按键消息”方式使用固定约25–29ms的消息间隔，因此不使用此设置。")));
+                       "“按键消息”使用固定约25–29ms的消息间隔；“keyup消息”只发送释放消息，二者均不使用此设置。")));
     hlayout_key_hold->addWidget(spin_key_hold_interval);
     hlayout_key_hold->addStretch();
     vlayout_main->addLayout(hlayout_key_hold);
