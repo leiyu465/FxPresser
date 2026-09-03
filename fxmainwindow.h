@@ -91,6 +91,8 @@ private:
     std::array<std::chrono::steady_clock::time_point, 10> lastPressedTimePoint;
     //最后一次按键的时间点，用于确定实际按键的时机
     std::chrono::steady_clock::time_point lastAnyPressedTimePoint;
+    //自动前台模式下，工具窗口被用户激活后短暂停止抢回游戏焦点
+    std::chrono::steady_clock::time_point autoForegroundPausedUntil;
     //公平轮询的起始位置，避免固定从F1扫描导致后续按键长期无法触发
     int nextKeyIndex = 0;
 

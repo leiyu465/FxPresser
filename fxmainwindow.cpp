@@ -37,6 +37,15 @@ FxMainWindow::FxMainWindow(QWidget* parent)
     setupUI();
 
     connect(&pressTimer, &QTimer::timeout, this, &FxMainWindow::pressProc);
+    connect(qApp, &QGuiApplication::applicationStateChanged, this,
+        [this](Qt::ApplicationState state) {
+            if (state == Qt::ApplicationActive && check_global_switch->isChecked())
+            {
+                autoForegroundPausedUntil = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(1500);
+                writeLog(QStringLiteral("检测到工具窗口获得焦点：自动切换游戏窗口暂停1.5秒"));
+            }
+        });
 
     QDir dir = QCoreApplication::applicationDirPath();
     dir.mkdir(QStringLiteral("config"));
@@ -274,6 +283,11 @@ bool FxMainWindow::pressKey(HWND window, UINT code)
     }
 
     const bool autoActivateWindow = method >= 4;
+    if (autoActivateWindow && std::chrono::steady_clock::now() < autoForegroundPausedUntil)
+    {
+        return false;
+    }
+
     if (autoActivateWindow && GetForegroundWindow() != window)
     {
         if (IsIconic(window))
