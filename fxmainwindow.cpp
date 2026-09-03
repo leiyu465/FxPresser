@@ -363,14 +363,23 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
         const UINT upMessage = WM_SYSKEYUP;
 
         const bool downOk = PostMessageA(target, downMessage, code, downParam) != FALSE;
-        const DWORD downError = downOk ? ERROR_SUCCESS : GetLastError();
-        const DWORD holdMilliseconds = 25 + (GetTickCount() % 5);
-        Sleep(holdMilliseconds);
-        const bool upOk = PostMessageA(target, upMessage, code, upParam) != FALSE;
+        if (!downOk)
+            *errorCode = GetLastError();
 
-        result = downOk && upOk;
-        if (!result)
-            *errorCode = upOk ? downError : GetLastError();
+        const DWORD holdMilliseconds = 25 + (GetTickCount() % 5);
+        QTimer::singleShot(static_cast<int>(holdMilliseconds), this,
+            [this, target, upMessage, code, upParam]() {
+                SetLastError(ERROR_SUCCESS);
+                const bool upOk = PostMessageA(target, upMessage, code, upParam) != FALSE;
+                const DWORD upError = upOk ? ERROR_SUCCESS : GetLastError();
+                writeLog(QStringLiteral("LittleBee消息释放：target=0x%1, msg=0x%2, vk=0x%3, lParam=0x%4, ok=%5, error=%6")
+                    .arg(reinterpret_cast<quintptr>(target), 0, 16)
+                    .arg(upMessage, 0, 16).arg(code, 0, 16)
+                    .arg(static_cast<DWORD>(upParam), 0, 16)
+                    .arg(upOk).arg(upError));
+            });
+
+        result = downOk;
 
         writeLog(QStringLiteral("LittleBee消息：target=0x%1, down=0x%2, up=0x%3, vk=0x%4, scan=0x%5, hold=%6ms, downLParam=0x%7, upLParam=0x%8")
             .arg(reinterpret_cast<quintptr>(target), 0, 16)
