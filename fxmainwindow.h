@@ -48,7 +48,7 @@ struct SConfigData
         std::fill(fxCD, fxCD + 10, 1.0);
         globalInterval = 0.1;
         defaultKey = -1;
-        sendMethod = 2; //默认使用“按键消息”
+        sendMethod = 14; //稳定方法ID，默认使用“按键消息”
         keyHoldInterval = 0.1;
 
         x = -1;

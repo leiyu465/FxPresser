@@ -353,86 +353,58 @@ bool FxMainWindow::ensureGameWindowValid(HWND window)
 bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD* errorCode)
 {
     HWND target = window;
-#if 0
-    // 已隐藏的实验实现保留在源码中，但不编入发布版，减少无用敏感 API 特征。
-    if (method == 11 || method == 12)
-    {
-        HWND child = GetTopWindow(window);
-        if (child)
-            target = child;
-    }
-#endif
-
     SetLastError(ERROR_SUCCESS);
-    bool result = true;
+    const UINT scanCode = MapVirtualKeyW(code, MAPVK_VK_TO_VSC);
+    const LPARAM downParam = static_cast<LPARAM>(1ULL | (static_cast<ULONGLONG>(scanCode) << 16));
+    const LPARAM upParam = static_cast<LPARAM>(static_cast<ULONGLONG>(downParam) |
+        (1ULL << 30) | (1ULL << 31));
 
-    if (method == 14)
+    // 编号2：只发送带完整释放参数的WM_KEYUP。
+    if (method == 8)
     {
-        // LittleBee 的非注入回退序列：完整扫描码 lParam + DOWN/UP。
-        const UINT scanCode = MapVirtualKeyW(code, MAPVK_VK_TO_VSC);
-        const LPARAM downParam = static_cast<LPARAM>(1ULL | (static_cast<ULONGLONG>(scanCode) << 16));
-        const LPARAM upParam = static_cast<LPARAM>(static_cast<ULONGLONG>(downParam) |
-            (1ULL << 30) | (1ULL << 31));
-        const UINT downMessage = WM_SYSKEYDOWN;
-        const UINT upMessage = WM_SYSKEYUP;
-
-        const bool downOk = PostMessageA(target, downMessage, code, downParam) != FALSE;
-        if (!downOk)
+        const bool result = PostMessageA(target, WM_KEYUP, code, upParam) != FALSE;
+        if (!result)
             *errorCode = GetLastError();
-
-        const DWORD holdMilliseconds = 25 + (GetTickCount() % 5);
-        QTimer::singleShot(static_cast<int>(holdMilliseconds), this,
-            [this, target, upMessage, code, upParam]() {
-                SetLastError(ERROR_SUCCESS);
-                const bool upOk = PostMessageA(target, upMessage, code, upParam) != FALSE;
-                const DWORD upError = upOk ? ERROR_SUCCESS : GetLastError();
-                writeLog(QStringLiteral("LittleBee消息释放：target=0x%1, msg=0x%2, vk=0x%3, lParam=0x%4, ok=%5, error=%6")
-                    .arg(reinterpret_cast<quintptr>(target), 0, 16)
-                    .arg(upMessage, 0, 16).arg(code, 0, 16)
-                    .arg(static_cast<DWORD>(upParam), 0, 16)
-                    .arg(upOk).arg(upError));
-            });
-
-        result = downOk;
-
-        writeLog(QStringLiteral("LittleBee消息：target=0x%1, down=0x%2, up=0x%3, vk=0x%4, scan=0x%5, hold=%6ms, downLParam=0x%7, upLParam=0x%8")
+        writeLog(QStringLiteral("KEYUP完整参数：target=0x%1, vk=0x%2, scan=0x%3, lParam=0x%4, ok=%5")
             .arg(reinterpret_cast<quintptr>(target), 0, 16)
-            .arg(downMessage, 0, 16).arg(upMessage, 0, 16)
-            .arg(code, 0, 16).arg(scanCode, 0, 16).arg(holdMilliseconds)
-            .arg(static_cast<DWORD>(downParam), 0, 16)
-            .arg(static_cast<DWORD>(upParam), 0, 16));
+            .arg(code, 0, 16).arg(scanCode, 0, 16)
+            .arg(static_cast<DWORD>(upParam), 0, 16).arg(result));
         return result;
     }
 
-#if 0
-    const LPARAM point = MAKELPARAM(50, 50);
+    // 14=编号9；15=编号9但lParam为0；16=编号13（额外发送一次KEYUP）。
+    const bool useSystemMessage = method != 16 && code == VK_F10;
+    const UINT downMessage = useSystemMessage ? WM_SYSKEYDOWN : WM_KEYDOWN;
+    const UINT upMessage = useSystemMessage ? WM_SYSKEYUP : WM_KEYUP;
+    const LPARAM selectedDownParam = method == 15 ? 0 : downParam;
+    const LPARAM selectedUpParam = method == 15 ? 0 : upParam;
 
-    // 9/12 精确复现旧版的可选右键按下；10 尝试完整右键点击。
-    if (method == 9 || method == 12)
-        result = PostMessageA(target, WM_RBUTTONDOWN, MK_RBUTTON, point) != FALSE;
-    else if (method == 10)
-    {
-        result = PostMessageA(target, WM_RBUTTONDOWN, MK_RBUTTON, point) != FALSE;
-        result = (PostMessageA(target, WM_RBUTTONUP, 0, point) != FALSE) && result;
-    }
-#endif
-
-    bool keyResult = false;
-#if 0
-    if (method == 13)
-        keyResult = SendNotifyMessageA(target, WM_KEYUP, code, 0) != FALSE;
-    else
-#endif
-        keyResult = PostMessageA(target, WM_KEYUP, code, 0) != FALSE;
-
-    result = result && keyResult;
-    if (!result)
+    const bool downOk = PostMessageA(target, downMessage, code, selectedDownParam) != FALSE;
+    if (!downOk)
         *errorCode = GetLastError();
 
-    writeLog(QStringLiteral("旧版消息目标：top=0x%1, actual=0x%2, msg=WM_KEYUP, wParam=0x%3, lParam=0")
-        .arg(reinterpret_cast<quintptr>(window), 0, 16)
-        .arg(reinterpret_cast<quintptr>(target), 0, 16).arg(code, 0, 16));
-    return result;
+    const DWORD holdMilliseconds = 25 + (GetTickCount() % 5);
+    QTimer::singleShot(static_cast<int>(holdMilliseconds), this,
+        [this, target, upMessage, code, selectedUpParam, method]() {
+            SetLastError(ERROR_SUCCESS);
+            const bool firstUpOk = PostMessageA(target, upMessage, code, selectedUpParam) != FALSE;
+            const bool secondUpOk = method != 16 ||
+                PostMessageA(target, WM_KEYUP, code, selectedUpParam) != FALSE;
+            const DWORD upError = firstUpOk && secondUpOk ? ERROR_SUCCESS : GetLastError();
+            writeLog(QStringLiteral("消息释放：target=0x%1, msg=0x%2, vk=0x%3, lParam=0x%4, upCount=%5, ok=%6, error=%7")
+                .arg(reinterpret_cast<quintptr>(target), 0, 16)
+                .arg(upMessage, 0, 16).arg(code, 0, 16)
+                .arg(static_cast<DWORD>(selectedUpParam), 0, 16)
+                .arg(method == 16 ? 2 : 1).arg(firstUpOk && secondUpOk).arg(upError));
+        });
+
+    writeLog(QStringLiteral("组合消息：method=%1, target=0x%2, down=0x%3, up=0x%4, vk=0x%5, scan=0x%6, hold=%7ms, downLParam=0x%8, upLParam=0x%9")
+        .arg(method).arg(reinterpret_cast<quintptr>(target), 0, 16)
+        .arg(downMessage, 0, 16).arg(upMessage, 0, 16)
+        .arg(code, 0, 16).arg(scanCode, 0, 16).arg(holdMilliseconds)
+        .arg(static_cast<DWORD>(selectedDownParam), 0, 16)
+        .arg(static_cast<DWORD>(selectedUpParam), 0, 16));
+    return downOk;
 }
 
 bool FxMainWindow::sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode)
@@ -658,7 +630,7 @@ SConfigData FxMainWindow::makeConfigFromUI()
 
     result.globalInterval = spin_global_interval->value();
     result.defaultKey = currentDefaultKey;
-    result.sendMethod = combo_send_method->currentIndex();
+    result.sendMethod = combo_send_method->currentData().toInt();
     result.keyHoldInterval = spin_key_hold_interval->value();
 
     result.hash = currentHash;
@@ -681,7 +653,10 @@ void FxMainWindow::applyConfigToUI(const SConfigData& config)
     }
 
     spin_global_interval->setValue(config.globalInterval);
-    combo_send_method->setCurrentIndex(qBound(0, config.sendMethod, combo_send_method->count() - 1));
+    int sendMethodIndex = combo_send_method->findData(config.sendMethod);
+    if (sendMethodIndex < 0)
+        sendMethodIndex = combo_send_method->findData(14);
+    combo_send_method->setCurrentIndex(sendMethodIndex);
     spin_key_hold_interval->setValue(config.keyHoldInterval);
 
     currentDefaultKey = config.defaultKey;
@@ -723,7 +698,7 @@ QJsonObject FxMainWindow::configToJson(const SConfigData& config)
 
     result["Interval"] = config.globalInterval;
     result["DefaultKey"] = config.defaultKey;
-    result["SendMethod"] = config.sendMethod;
+    result["SendMethodId"] = config.sendMethod;
     result["KeyHoldInterval"] = config.keyHoldInterval;
 
     result["X"] = config.x;
@@ -753,9 +728,19 @@ SConfigData FxMainWindow::jsonToConfig(QJsonObject json)
         }
     }
 
-    result.globalInterval = json.take("Interval").toDouble(0.8);
+    result.globalInterval = json.take("Interval").toDouble(0.1);
     result.defaultKey = json.take("DefaultKey").toInt(-1);
-    result.sendMethod = json.take("SendMethod").toInt(2);
+    if (json.contains("SendMethodId"))
+    {
+        result.sendMethod = json.take("SendMethodId").toInt(14);
+    }
+    else
+    {
+        // 兼容旧配置中保存的下拉框索引：自动、手动、按键消息、keyup消息。
+        const int legacyIndex = json.take("SendMethod").toInt(2);
+        const int legacyMethods[] = { 4, 0, 14, 8 };
+        result.sendMethod = legacyIndex >= 0 && legacyIndex < 4 ? legacyMethods[legacyIndex] : 14;
+    }
     result.keyHoldInterval = json.take("KeyHoldInterval").toDouble(0.1);
 
     result.x = json.take("X").toInt(-1);
@@ -868,10 +853,12 @@ void FxMainWindow::setupUI()
 
     auto hlayout_send_method = new QHBoxLayout;
     combo_send_method = new QComboBox;
-    combo_send_method->addItem(QStringLiteral("键盘+自动窗口"), 4);
-    combo_send_method->addItem(QStringLiteral("键盘+手动窗口"), 0);
-    combo_send_method->addItem(QStringLiteral("按键消息"), 14);
     combo_send_method->addItem(QStringLiteral("keyup消息"), 8);
+    combo_send_method->addItem(QStringLiteral("按键消息"), 14);
+    combo_send_method->addItem(QStringLiteral("按键消息（0）"), 15);
+    combo_send_method->addItem(QStringLiteral("双释放消息"), 16);
+    combo_send_method->addItem(QStringLiteral("键盘+自动"), 4);
+    combo_send_method->addItem(QStringLiteral("键盘+手动"), 0);
 
     // 以下实验方式保留实现，仅从界面下拉框隐藏，后续需要时可直接恢复。
     // combo_send_method->addItem(QStringLiteral("SendInput / 扫描码 / 手动保持前台"), 1);
