@@ -359,7 +359,92 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
     const LPARAM upParam = static_cast<LPARAM>(static_cast<ULONGLONG>(downParam) |
         (1ULL << 30) | (1ULL << 31));
 
-    // 编号2：只发送带完整释放参数的WM_KEYUP。
+    // 实验模式：临时共享GUI线程输入状态，让目标WndProc中的GetKeyState
+    // 能在同步处理消息时看到指定按键的高位状态。它不影响DirectInput/GetAsyncKeyState。
+    if (method == 17)
+    {
+        if (sharedKeyboardStateActive)
+        {
+            *errorCode = ERROR_BUSY;
+            writeLog(QStringLiteral("共享状态消息跳过：上一组按键尚未释放"));
+            return false;
+        }
+
+        DWORD processId = 0;
+        const DWORD gameThreadId = GetWindowThreadProcessId(target, &processId);
+        const DWORD toolThreadId = GetCurrentThreadId();
+        if (gameThreadId == 0 || gameThreadId == toolThreadId)
+        {
+            *errorCode = ERROR_INVALID_THREAD_ID;
+            return false;
+        }
+
+        std::array<BYTE, 256> originalState{};
+        GetKeyboardState(originalState.data());
+
+        SetLastError(ERROR_SUCCESS);
+        if (!AttachThreadInput(toolThreadId, gameThreadId, TRUE))
+        {
+            *errorCode = GetLastError();
+            writeLog(QStringLiteral("共享状态消息失败：AttachThreadInput error=%1").arg(*errorCode));
+            return false;
+        }
+
+        sharedKeyboardStateActive = true;
+        std::array<BYTE, 256> downState = originalState;
+        downState[code & 0xff] |= 0x80;
+        if (!SetKeyboardState(downState.data()))
+        {
+            *errorCode = GetLastError();
+            SetKeyboardState(originalState.data());
+            AttachThreadInput(toolThreadId, gameThreadId, FALSE);
+            sharedKeyboardStateActive = false;
+            return false;
+        }
+
+        const bool useSystemMessage = code == VK_F10;
+        const UINT downMessage = useSystemMessage ? WM_SYSKEYDOWN : WM_KEYDOWN;
+        const UINT upMessage = useSystemMessage ? WM_SYSKEYUP : WM_KEYUP;
+        DWORD_PTR downResult = 0;
+        SetLastError(ERROR_SUCCESS);
+        const bool downOk = SendMessageTimeoutA(target, downMessage, code, downParam,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK, 100, &downResult) != 0;
+        if (!downOk)
+        {
+            *errorCode = GetLastError();
+            SetKeyboardState(originalState.data());
+            AttachThreadInput(toolThreadId, gameThreadId, FALSE);
+            sharedKeyboardStateActive = false;
+            return false;
+        }
+
+        const DWORD holdMilliseconds = 25 + (GetTickCount() % 5);
+        QTimer::singleShot(static_cast<int>(holdMilliseconds), this,
+            [this, target, code, upMessage, upParam, originalState, toolThreadId, gameThreadId]() mutable {
+                std::array<BYTE, 256> upState = originalState;
+                upState[code & 0xff] &= 0x7f;
+                const bool stateOk = SetKeyboardState(upState.data()) != FALSE;
+
+                DWORD_PTR upResult = 0;
+                SetLastError(ERROR_SUCCESS);
+                const bool upOk = SendMessageTimeoutA(target, upMessage, code, upParam,
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 100, &upResult) != 0;
+                const DWORD upError = upOk ? ERROR_SUCCESS : GetLastError();
+
+                SetKeyboardState(originalState.data());
+                const bool detachOk = AttachThreadInput(toolThreadId, gameThreadId, FALSE) != FALSE;
+                sharedKeyboardStateActive = false;
+                writeLog(QStringLiteral("共享状态释放：state=%1, message=%2, detach=%3, error=%4")
+                    .arg(stateOk).arg(upOk).arg(detachOk).arg(upError));
+            });
+
+        writeLog(QStringLiteral("共享状态按下：pid=%1, gameThread=%2, vk=0x%3, scan=0x%4, hold=%5ms")
+            .arg(processId).arg(gameThreadId).arg(code, 0, 16).arg(scanCode, 0, 16)
+            .arg(holdMilliseconds));
+        return true;
+    }
+
+    // 实机验证无效，保留实现用于诊断：编号2，只发送带完整释放参数的WM_KEYUP。
     if (method == 8)
     {
         const bool result = PostMessageA(target, WM_KEYUP, code, upParam) != FALSE;
@@ -372,6 +457,7 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
         return result;
     }
 
+    // 以下三种方式均已实机验证无效，保留实现用于诊断：
     // 14=编号9；15=编号9但lParam为0；16=编号13（额外发送一次KEYUP）。
     const bool useSystemMessage = method != 16 && code == VK_F10;
     const UINT downMessage = useSystemMessage ? WM_SYSKEYDOWN : WM_KEYDOWN;
@@ -655,7 +741,7 @@ void FxMainWindow::applyConfigToUI(const SConfigData& config)
     spin_global_interval->setValue(config.globalInterval);
     int sendMethodIndex = combo_send_method->findData(config.sendMethod);
     if (sendMethodIndex < 0)
-        sendMethodIndex = combo_send_method->findData(14);
+        sendMethodIndex = combo_send_method->findData(17);
     combo_send_method->setCurrentIndex(sendMethodIndex);
     spin_key_hold_interval->setValue(config.keyHoldInterval);
 
@@ -732,14 +818,14 @@ SConfigData FxMainWindow::jsonToConfig(QJsonObject json)
     result.defaultKey = json.take("DefaultKey").toInt(-1);
     if (json.contains("SendMethodId"))
     {
-        result.sendMethod = json.take("SendMethodId").toInt(14);
+        result.sendMethod = json.take("SendMethodId").toInt(17);
     }
     else
     {
         // 兼容旧配置中保存的下拉框索引：自动、手动、按键消息、keyup消息。
         const int legacyIndex = json.take("SendMethod").toInt(2);
         const int legacyMethods[] = { 4, 0, 14, 8 };
-        result.sendMethod = legacyIndex >= 0 && legacyIndex < 4 ? legacyMethods[legacyIndex] : 14;
+        result.sendMethod = legacyIndex >= 0 && legacyIndex < 4 ? legacyMethods[legacyIndex] : 17;
     }
     result.keyHoldInterval = json.take("KeyHoldInterval").toDouble(0.1);
 
@@ -853,12 +939,15 @@ void FxMainWindow::setupUI()
 
     auto hlayout_send_method = new QHBoxLayout;
     combo_send_method = new QComboBox;
-    combo_send_method->addItem(QStringLiteral("keyup消息"), 8);
-    combo_send_method->addItem(QStringLiteral("按键消息"), 14);
-    combo_send_method->addItem(QStringLiteral("按键消息（0）"), 15);
-    combo_send_method->addItem(QStringLiteral("双释放消息"), 16);
+    combo_send_method->addItem(QStringLiteral("共享状态消息"), 17);
     combo_send_method->addItem(QStringLiteral("键盘+自动"), 4);
     combo_send_method->addItem(QStringLiteral("键盘+手动"), 0);
+
+    // 以下方式已经实机验证无效：从下拉框移除，但发送实现仍保留。
+    // combo_send_method->addItem(QStringLiteral("keyup消息"), 8);
+    // combo_send_method->addItem(QStringLiteral("按键消息"), 14);
+    // combo_send_method->addItem(QStringLiteral("按键消息（0）"), 15);
+    // combo_send_method->addItem(QStringLiteral("双释放消息"), 16);
 
     // 以下实验方式保留实现，仅从界面下拉框隐藏，后续需要时可直接恢复。
     // combo_send_method->addItem(QStringLiteral("SendInput / 扫描码 / 手动保持前台"), 1);
@@ -896,7 +985,7 @@ void FxMainWindow::setupUI()
         QStringLiteral("释放间隔计算逻辑"),
         QStringLiteral("键盘方式会先发送按下，再等待该时间，最后发送释放。\n\n"
                        "计算：释放时间 = 按下时间 + 释放间隔。\n\n"
-                       "“按键消息”使用固定约25–29ms的消息间隔；“keyup消息”只发送释放消息，二者均不使用此设置。")));
+                       "“共享状态消息”使用固定约25–29ms的消息间隔，因此不使用此设置。")));
     hlayout_key_hold->addWidget(spin_key_hold_interval);
     hlayout_key_hold->addStretch();
     vlayout_main->addLayout(hlayout_key_hold);

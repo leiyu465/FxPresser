@@ -48,7 +48,7 @@ struct SConfigData
         std::fill(fxCD, fxCD + 10, 1.0);
         globalInterval = 0.1;
         defaultKey = -1;
-        sendMethod = 14; //稳定方法ID，默认使用“按键消息”
+        sendMethod = 17; //稳定方法ID，默认使用待验证的“共享状态消息”
         keyHoldInterval = 0.1;
 
         x = -1;
@@ -95,6 +95,8 @@ private:
     std::chrono::steady_clock::time_point autoForegroundPausedUntil;
     //公平轮询的起始位置，避免固定从F1扫描导致后续按键长期无法触发
     int nextKeyIndex = 0;
+    //共享键盘状态实验模式同一时间只允许一组DOWN/UP事务
+    bool sharedKeyboardStateActive = false;
 
     //扫描到的游戏窗口数据
     QVector<HWND> gameWindows;
