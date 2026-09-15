@@ -8,9 +8,10 @@ TEMPLATE = app
 
 SOURCES += \
     main.cpp \
-    fxmainwindow.cpp
+    fxmainwindow.cpp \
+    sharedinputworker.cpp
 
-HEADERS += fxmainwindow.h
+HEADERS += fxmainwindow.h sharedinputworker.h
 RC_FILE = icon.rc
 
 # 生成无需 Qt/MinGW 运行库 DLL 的 32 位 Windows 单文件程序。

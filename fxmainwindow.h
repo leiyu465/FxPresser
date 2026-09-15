@@ -21,6 +21,7 @@
 #include <QPointer>
 
 class QTextEdit;
+class SharedInputWorker;
 
 #include <windows.h>
 
@@ -95,8 +96,7 @@ private:
     std::chrono::steady_clock::time_point autoForegroundPausedUntil;
     //公平轮询的起始位置，避免固定从F1扫描导致后续按键长期无法触发
     int nextKeyIndex = 0;
-    //共享键盘状态实验模式同一时间只允许一组DOWN/UP事务
-    bool sharedKeyboardStateActive = false;
+    SharedInputWorker* sharedInputWorker;
 
     //扫描到的游戏窗口数据
     QVector<HWND> gameWindows;

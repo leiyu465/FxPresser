@@ -1,4 +1,5 @@
 ﻿#include "fxmainwindow.h"
+#include "sharedinputworker.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -37,6 +38,10 @@ FxMainWindow::FxMainWindow(QWidget* parent)
 {
     setupUI();
 
+    sharedInputWorker = new SharedInputWorker(this);
+    connect(sharedInputWorker, &SharedInputWorker::debugMessage,
+        this, &FxMainWindow::writeLog);
+
     connect(&pressTimer, &QTimer::timeout, this, &FxMainWindow::pressProc);
     connect(qApp, &QGuiApplication::applicationStateChanged, this,
         [this](Qt::ApplicationState state) {
@@ -69,6 +74,7 @@ FxMainWindow::FxMainWindow(QWidget* parent)
 FxMainWindow::~FxMainWindow()
 {
     pressTimer.stop();
+    sharedInputWorker->stopForWindow();
 
     writeLog(QStringLiteral("程序退出，保存配置"));
     autoWriteConfig();
@@ -267,6 +273,15 @@ bool FxMainWindow::tryPressKey(HWND window, int key_index, bool force)
 bool FxMainWindow::pressKey(HWND window, UINT code)
 {
     const int method = combo_send_method->currentData().toInt();
+    if (method == 17)
+    {
+        const int holdMilliseconds = randomizedKeyHoldMilliseconds();
+        const bool queued = sharedInputWorker->enqueueKey(code, holdMilliseconds);
+        writeLog(QStringLiteral("共享状态按键入队：vk=0x%1, hold=%2ms, ok=%3")
+            .arg(code, 0, 16).arg(holdMilliseconds).arg(queued));
+        return queued;
+    }
+
     if (method >= 8)
     {
         DWORD errorCode = ERROR_SUCCESS;
@@ -359,103 +374,6 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
     const LPARAM downParam = static_cast<LPARAM>(1ULL | (static_cast<ULONGLONG>(scanCode) << 16));
     const LPARAM upParam = static_cast<LPARAM>(static_cast<ULONGLONG>(downParam) |
         (1ULL << 30) | (1ULL << 31));
-
-    // 实验模式：临时共享GUI线程输入状态，让目标WndProc中的GetKeyState
-    // 能在同步处理消息时看到指定按键的高位状态。它不影响DirectInput/GetAsyncKeyState。
-    if (method == 17)
-    {
-        if (sharedKeyboardStateActive)
-        {
-            *errorCode = ERROR_BUSY;
-            writeLog(QStringLiteral("共享状态消息跳过：上一组按键尚未释放"));
-            return false;
-        }
-
-        DWORD processId = 0;
-        const DWORD gameThreadId = GetWindowThreadProcessId(target, &processId);
-        const DWORD toolThreadId = GetCurrentThreadId();
-        if (gameThreadId == 0 || gameThreadId == toolThreadId)
-        {
-            *errorCode = ERROR_INVALID_THREAD_ID;
-            return false;
-        }
-
-        // 在Attach前一刻获取最新状态；该快照只用于紧接着的DOWN同步调用，
-        // 不会跨越释放间隔，也不会在25ms后再次覆盖用户输入。
-        std::array<BYTE, 256> currentState{};
-        if (!GetKeyboardState(currentState.data()))
-        {
-            *errorCode = GetLastError();
-            return false;
-        }
-
-        SetLastError(ERROR_SUCCESS);
-        if (!AttachThreadInput(toolThreadId, gameThreadId, TRUE))
-        {
-            *errorCode = GetLastError();
-            writeLog(QStringLiteral("共享状态消息失败：AttachThreadInput error=%1").arg(*errorCode));
-            return false;
-        }
-
-        sharedKeyboardStateActive = true;
-        // API必须接收256字节整表，但写入内容与Attach前最新状态完全相同，
-        // 只有目标F键的高位被改变。
-        std::array<BYTE, 256> downState = currentState;
-        downState[code & 0xff] |= 0x80;
-        if (!SetKeyboardState(downState.data()))
-        {
-            *errorCode = GetLastError();
-            AttachThreadInput(toolThreadId, gameThreadId, FALSE);
-            sharedKeyboardStateActive = false;
-            return false;
-        }
-
-        const bool useSystemMessage = code == VK_F10;
-        const UINT downMessage = useSystemMessage ? WM_SYSKEYDOWN : WM_KEYDOWN;
-        const UINT upMessage = useSystemMessage ? WM_SYSKEYUP : WM_KEYUP;
-        DWORD_PTR downResult = 0;
-        SetLastError(ERROR_SUCCESS);
-        const bool downOk = SendMessageTimeoutA(target, downMessage, code, downParam,
-            SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &downResult) != 0;
-        const DWORD downError = downOk ? ERROR_SUCCESS : GetLastError();
-
-        // DOWN已由目标WndProc同步处理，立即清除仅由我们设置的目标键并解除关联。
-        // 释放间隔期间两个线程不再共享键盘、焦点或鼠标输入状态。
-        std::array<BYTE, 256> latestState{};
-        const bool latestStateOk = GetKeyboardState(latestState.data()) != FALSE;
-        if (latestStateOk)
-        {
-            latestState[code & 0xff] &= 0x7f;
-            SetKeyboardState(latestState.data());
-        }
-        const bool detachOk = AttachThreadInput(toolThreadId, gameThreadId, FALSE) != FALSE;
-
-        if (!downOk)
-        {
-            *errorCode = downError;
-            sharedKeyboardStateActive = false;
-            return false;
-        }
-
-        const int holdMilliseconds = randomizedKeyHoldMilliseconds();
-        QTimer::singleShot(holdMilliseconds, this,
-            [this, target, code, upMessage, upParam]() {
-                DWORD_PTR upResult = 0;
-                SetLastError(ERROR_SUCCESS);
-                const bool upOk = SendMessageTimeoutA(target, upMessage, code, upParam,
-                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &upResult) != 0;
-                const DWORD upError = upOk ? ERROR_SUCCESS : GetLastError();
-
-                sharedKeyboardStateActive = false;
-                writeLog(QStringLiteral("共享状态释放：message=%1, error=%2")
-                    .arg(upOk).arg(upError));
-            });
-
-        writeLog(QStringLiteral("共享状态按下：pid=%1, gameThread=%2, vk=0x%3, scan=0x%4, hold=%5ms, stateRead=%6, detach=%7")
-            .arg(processId).arg(gameThreadId).arg(code, 0, 16).arg(scanCode, 0, 16)
-            .arg(holdMilliseconds).arg(latestStateOk).arg(detachOk));
-        return true;
-    }
 
     // 实机验证无效，保留实现用于诊断：编号2，只发送带完整释放参数的WM_KEYUP。
     if (method == 8)
@@ -987,6 +905,8 @@ void FxMainWindow::setupUI()
     combo_send_method->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     connect(combo_send_method, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
         [this](int) {
+            if (check_global_switch->isChecked())
+                check_global_switch->setChecked(false);
             writeLog(QStringLiteral("切换按键发送方式：%1").arg(currentSendMethodName()));
         });
     hlayout_send_method->addWidget(new QLabel(QStringLiteral("按键方式")));
@@ -1033,6 +953,16 @@ void FxMainWindow::setupUI()
                 if (!ensureGameWindowValid(gameWindows[windowIndex]))
                     return;
 
+                if (combo_send_method->currentData().toInt() == 17 &&
+                    !sharedInputWorker->startForWindow(gameWindows[windowIndex]))
+                {
+                    check_global_switch->setChecked(false);
+                    QMessageBox::warning(this,
+                        QStringLiteral("共享输入启动失败"),
+                        QStringLiteral("无法将独立输入线程连接到游戏窗口，请重新扫描窗口或检查权限。"));
+                    return;
+                }
+
                 defaultKeyTriggered = false;
                 resetAllTimeStamps();
 
@@ -1041,7 +971,10 @@ void FxMainWindow::setupUI()
                     .arg(currentSendMethodName()));
             }
             else
+            {
+                sharedInputWorker->stopForWindow();
                 writeLog(QStringLiteral("全局开关已关闭"));
+            }
         });
     auto hlayout_switch = new QHBoxLayout;
     hlayout_switch->addStretch();
