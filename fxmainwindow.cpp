@@ -12,6 +12,7 @@
 #include <QTextEdit>
 #include <QTextCursor>
 #include <QToolButton>
+#include <random>
 //角色名取样区域
 static const QRect playerNameRect{ 80,22,90,14 };
 
@@ -314,7 +315,7 @@ bool FxMainWindow::pressKey(HWND window, UINT code)
         .arg(reinterpret_cast<quintptr>(window), 0, 16)
         .arg(foreground).arg(downOk).arg(errorCode));
 
-    const int holdMilliseconds = qRound(spin_key_hold_interval->value() * 1000.0);
+    const int holdMilliseconds = randomizedKeyHoldMilliseconds();
     QTimer::singleShot(holdMilliseconds, this,
         [this, code, method]() {
             DWORD upError = ERROR_SUCCESS;
@@ -379,8 +380,14 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
             return false;
         }
 
-        std::array<BYTE, 256> originalState{};
-        GetKeyboardState(originalState.data());
+        // 在Attach前一刻获取最新状态；该快照只用于紧接着的DOWN同步调用，
+        // 不会跨越释放间隔，也不会在25ms后再次覆盖用户输入。
+        std::array<BYTE, 256> currentState{};
+        if (!GetKeyboardState(currentState.data()))
+        {
+            *errorCode = GetLastError();
+            return false;
+        }
 
         SetLastError(ERROR_SUCCESS);
         if (!AttachThreadInput(toolThreadId, gameThreadId, TRUE))
@@ -391,12 +398,13 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
         }
 
         sharedKeyboardStateActive = true;
-        std::array<BYTE, 256> downState = originalState;
+        // API必须接收256字节整表，但写入内容与Attach前最新状态完全相同，
+        // 只有目标F键的高位被改变。
+        std::array<BYTE, 256> downState = currentState;
         downState[code & 0xff] |= 0x80;
         if (!SetKeyboardState(downState.data()))
         {
             *errorCode = GetLastError();
-            SetKeyboardState(originalState.data());
             AttachThreadInput(toolThreadId, gameThreadId, FALSE);
             sharedKeyboardStateActive = false;
             return false;
@@ -408,39 +416,44 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
         DWORD_PTR downResult = 0;
         SetLastError(ERROR_SUCCESS);
         const bool downOk = SendMessageTimeoutA(target, downMessage, code, downParam,
-            SMTO_ABORTIFHUNG | SMTO_BLOCK, 100, &downResult) != 0;
+            SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &downResult) != 0;
+        const DWORD downError = downOk ? ERROR_SUCCESS : GetLastError();
+
+        // DOWN已由目标WndProc同步处理，立即清除仅由我们设置的目标键并解除关联。
+        // 释放间隔期间两个线程不再共享键盘、焦点或鼠标输入状态。
+        std::array<BYTE, 256> latestState{};
+        const bool latestStateOk = GetKeyboardState(latestState.data()) != FALSE;
+        if (latestStateOk)
+        {
+            latestState[code & 0xff] &= 0x7f;
+            SetKeyboardState(latestState.data());
+        }
+        const bool detachOk = AttachThreadInput(toolThreadId, gameThreadId, FALSE) != FALSE;
+
         if (!downOk)
         {
-            *errorCode = GetLastError();
-            SetKeyboardState(originalState.data());
-            AttachThreadInput(toolThreadId, gameThreadId, FALSE);
+            *errorCode = downError;
             sharedKeyboardStateActive = false;
             return false;
         }
 
-        const DWORD holdMilliseconds = 25 + (GetTickCount() % 5);
-        QTimer::singleShot(static_cast<int>(holdMilliseconds), this,
-            [this, target, code, upMessage, upParam, originalState, toolThreadId, gameThreadId]() mutable {
-                std::array<BYTE, 256> upState = originalState;
-                upState[code & 0xff] &= 0x7f;
-                const bool stateOk = SetKeyboardState(upState.data()) != FALSE;
-
+        const int holdMilliseconds = randomizedKeyHoldMilliseconds();
+        QTimer::singleShot(holdMilliseconds, this,
+            [this, target, code, upMessage, upParam]() {
                 DWORD_PTR upResult = 0;
                 SetLastError(ERROR_SUCCESS);
                 const bool upOk = SendMessageTimeoutA(target, upMessage, code, upParam,
-                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 100, &upResult) != 0;
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &upResult) != 0;
                 const DWORD upError = upOk ? ERROR_SUCCESS : GetLastError();
 
-                SetKeyboardState(originalState.data());
-                const bool detachOk = AttachThreadInput(toolThreadId, gameThreadId, FALSE) != FALSE;
                 sharedKeyboardStateActive = false;
-                writeLog(QStringLiteral("共享状态释放：state=%1, message=%2, detach=%3, error=%4")
-                    .arg(stateOk).arg(upOk).arg(detachOk).arg(upError));
+                writeLog(QStringLiteral("共享状态释放：message=%1, error=%2")
+                    .arg(upOk).arg(upError));
             });
 
-        writeLog(QStringLiteral("共享状态按下：pid=%1, gameThread=%2, vk=0x%3, scan=0x%4, hold=%5ms")
+        writeLog(QStringLiteral("共享状态按下：pid=%1, gameThread=%2, vk=0x%3, scan=0x%4, hold=%5ms, stateRead=%6, detach=%7")
             .arg(processId).arg(gameThreadId).arg(code, 0, 16).arg(scanCode, 0, 16)
-            .arg(holdMilliseconds));
+            .arg(holdMilliseconds).arg(latestStateOk).arg(detachOk));
         return true;
     }
 
@@ -469,8 +482,8 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
     if (!downOk)
         *errorCode = GetLastError();
 
-    const DWORD holdMilliseconds = 25 + (GetTickCount() % 5);
-    QTimer::singleShot(static_cast<int>(holdMilliseconds), this,
+    const int holdMilliseconds = randomizedKeyHoldMilliseconds();
+    QTimer::singleShot(holdMilliseconds, this,
         [this, target, upMessage, code, selectedUpParam, method]() {
             SetLastError(ERROR_SUCCESS);
             const bool firstUpOk = PostMessageA(target, upMessage, code, selectedUpParam) != FALSE;
@@ -491,6 +504,14 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
         .arg(static_cast<DWORD>(selectedDownParam), 0, 16)
         .arg(static_cast<DWORD>(selectedUpParam), 0, 16));
     return downOk;
+}
+
+int FxMainWindow::randomizedKeyHoldMilliseconds() const
+{
+    const int configuredMilliseconds = qRound(spin_key_hold_interval->value() * 1000.0);
+    static std::mt19937 generator(static_cast<unsigned int>(GetTickCount() ^ GetCurrentProcessId()));
+    static std::uniform_int_distribution<int> jitter(-2, 2);
+    return qMax(1, configuredMilliseconds + jitter(generator));
 }
 
 bool FxMainWindow::sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode)
@@ -579,7 +600,7 @@ void FxMainWindow::showLogWindow()
     writeLog(QStringLiteral("当前设置：按键方式=%1，全局间隔=%2s，释放间隔=%3s")
         .arg(currentSendMethodName())
         .arg(spin_global_interval->value(), 0, 'f', 2)
-        .arg(spin_key_hold_interval->value(), 0, 'f', 2));
+        .arg(spin_key_hold_interval->value(), 0, 'f', 3));
 
     const int windowIndex = combo_windows->currentIndex();
     if (windowIndex >= 0 && windowIndex < gameWindows.size())
@@ -827,7 +848,7 @@ SConfigData FxMainWindow::jsonToConfig(QJsonObject json)
         const int legacyMethods[] = { 4, 0, 14, 8 };
         result.sendMethod = legacyIndex >= 0 && legacyIndex < 4 ? legacyMethods[legacyIndex] : 17;
     }
-    result.keyHoldInterval = json.take("KeyHoldInterval").toDouble(0.1);
+    result.keyHoldInterval = json.take("KeyHoldInterval").toDouble(0.027);
 
     result.x = json.take("X").toInt(-1);
     result.y = json.take("Y").toInt(-1);
@@ -974,18 +995,18 @@ void FxMainWindow::setupUI()
 
     spin_key_hold_interval = new QDoubleSpinBox;
     spin_key_hold_interval->setSuffix(QStringLiteral(" s"));
-    spin_key_hold_interval->setDecimals(2);
-    spin_key_hold_interval->setMinimum(0.01);
+    spin_key_hold_interval->setDecimals(3);
+    spin_key_hold_interval->setMinimum(0.003);
     spin_key_hold_interval->setMaximum(5.0);
-    spin_key_hold_interval->setSingleStep(0.01);
-    spin_key_hold_interval->setValue(0.1);
+    spin_key_hold_interval->setSingleStep(0.001);
+    spin_key_hold_interval->setValue(0.027);
     auto hlayout_key_hold = new QHBoxLayout;
     hlayout_key_hold->addWidget(new QLabel(QStringLiteral("释放间隔")));
     hlayout_key_hold->addWidget(makeHelpButton(
         QStringLiteral("释放间隔计算逻辑"),
         QStringLiteral("键盘方式会先发送按下，再等待该时间，最后发送释放。\n\n"
-                       "计算：释放时间 = 按下时间 + 释放间隔。\n\n"
-                       "“共享状态消息”使用固定约25–29ms的消息间隔，因此不使用此设置。")));
+                       "计算：实际释放间隔 = 当前设置值 + 随机抖动（-2ms至+2ms）。\n\n"
+                       "所有包含DOWN/UP的可用模式都使用该设置；默认27ms，实际为25–29ms。")));
     hlayout_key_hold->addWidget(spin_key_hold_interval);
     hlayout_key_hold->addStretch();
     vlayout_main->addLayout(hlayout_key_hold);

@@ -49,7 +49,7 @@ struct SConfigData
         globalInterval = 0.1;
         defaultKey = -1;
         sendMethod = 17; //稳定方法ID，默认使用待验证的“共享状态消息”
-        keyHoldInterval = 0.1;
+        keyHoldInterval = 0.027;
 
         x = -1;
         y = -1;
@@ -130,6 +130,7 @@ private:
     bool ensureGameWindowValid(HWND window);
     bool sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode);
     bool sendLegacyWindowKey(HWND window, UINT code, int method, DWORD* errorCode);
+    int randomizedKeyHoldMilliseconds() const;
 
     //调试日志仅在窗口打开期间存在，不写入任何文件
     QPointer<QTextEdit> logTextEdit;
