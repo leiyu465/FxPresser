@@ -120,10 +120,15 @@ void SharedInputWorker::run()
             const bool downOk = sendKeyMessage(pendingCommand, false, &downError);
             keyIsDown = true;
 
-            releaseTimer = SetTimer(nullptr, 0,
-                static_cast<UINT>(pendingCommand.holdMilliseconds), nullptr);
-            if (releaseTimer == 0)
+            if (pendingCommand.holdMilliseconds < 1)
                 PostThreadMessageW(currentWorkerThreadId, WM_TIMER, 0, 0);
+            else
+            {
+                releaseTimer = SetTimer(nullptr, 0,
+                    static_cast<UINT>(pendingCommand.holdMilliseconds), nullptr);
+                if (releaseTimer == 0)
+                    PostThreadMessageW(currentWorkerThreadId, WM_TIMER, 0, 0);
+            }
 
             emit debugMessage(QStringLiteral("共享状态按下：vk=0x%1, hold=%2ms, state=%3, message=%4, error=%5")
                 .arg(pendingCommand.virtualKey, 0, 16).arg(pendingCommand.holdMilliseconds)

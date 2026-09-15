@@ -299,14 +299,17 @@ bool FxMainWindow::pressKey(HWND window, UINT code)
         .arg(foreground).arg(downOk).arg(errorCode));
 
     const int holdMilliseconds = randomizedKeyHoldMilliseconds();
-    QTimer::singleShot(holdMilliseconds, this,
-        [this, code, method, effectiveMethodName]() {
+    const auto releaseKey = [this, code, method, effectiveMethodName]() {
             DWORD upError = ERROR_SUCCESS;
             const bool upOk = sendGlobalKey(true, code, method, &upError);
             writeLog(QStringLiteral("按键释放：method=%1, vk=0x%2, ok=%3, error=%4")
                 .arg(effectiveMethodName)
                 .arg(code, 0, 16).arg(upOk).arg(upError));
-        });
+        };
+    if (holdMilliseconds < 1)
+        releaseKey();
+    else
+        QTimer::singleShot(holdMilliseconds, this, releaseKey);
     return downOk;
 }
 
@@ -414,8 +417,7 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
         *errorCode = GetLastError();
 
     const int holdMilliseconds = randomizedKeyHoldMilliseconds();
-    QTimer::singleShot(holdMilliseconds, this,
-        [this, target, upMessage, code, selectedUpParam, method]() {
+    const auto releaseKey = [this, target, upMessage, code, selectedUpParam, method]() {
             SetLastError(ERROR_SUCCESS);
             const bool firstUpOk = PostMessageA(target, upMessage, code, selectedUpParam) != FALSE;
             const bool secondUpOk = method != 16 ||
@@ -426,7 +428,11 @@ bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD
                 .arg(upMessage, 0, 16).arg(code, 0, 16)
                 .arg(static_cast<DWORD>(selectedUpParam), 0, 16)
                 .arg(method == 16 ? 2 : 1).arg(firstUpOk && secondUpOk).arg(upError));
-        });
+        };
+    if (holdMilliseconds < 1)
+        releaseKey();
+    else
+        QTimer::singleShot(holdMilliseconds, this, releaseKey);
 
     writeLog(QStringLiteral("组合消息：method=%1, target=0x%2, down=0x%3, up=0x%4, vk=0x%5, scan=0x%6, hold=%7ms, downLParam=0x%8, upLParam=0x%9")
         .arg(method).arg(reinterpret_cast<quintptr>(target), 0, 16)
@@ -442,7 +448,8 @@ int FxMainWindow::randomizedKeyHoldMilliseconds() const
     const int configuredMilliseconds = qRound(spin_key_hold_interval->value() * 1000.0);
     static std::mt19937 generator(static_cast<unsigned int>(GetTickCount() ^ GetCurrentProcessId()));
     static std::uniform_int_distribution<int> jitter(-2, 2);
-    return qMax(1, configuredMilliseconds + jitter(generator));
+    const int randomizedMilliseconds = configuredMilliseconds + jitter(generator);
+    return randomizedMilliseconds < 1 ? 0 : randomizedMilliseconds;
 }
 
 bool FxMainWindow::sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode)
@@ -893,7 +900,7 @@ void FxMainWindow::setupUI()
     spin_key_hold_interval = new QDoubleSpinBox;
     spin_key_hold_interval->setSuffix(QStringLiteral(" s"));
     spin_key_hold_interval->setDecimals(3);
-    spin_key_hold_interval->setMinimum(0.003);
+    spin_key_hold_interval->setMinimum(-5.0);
     spin_key_hold_interval->setMaximum(5.0);
     spin_key_hold_interval->setSingleStep(0.001);
     spin_key_hold_interval->setValue(0.027);
@@ -903,6 +910,7 @@ void FxMainWindow::setupUI()
         QStringLiteral("释放间隔计算逻辑"),
         QStringLiteral("键盘方式会先发送按下，再等待该时间，最后发送释放。\n\n"
                        "计算：实际释放间隔 = 当前设置值 + 随机抖动（-2ms至+2ms）。\n\n"
+                       "随机结果小于1ms时立即释放，不启用延迟；否则至少延迟1ms。\n\n"
                        "所有包含DOWN/UP的可用模式都使用该设置；默认27ms，实际为25–29ms。")));
     hlayout_key_hold->addWidget(spin_key_hold_interval);
     hlayout_key_hold->addStretch();
