@@ -3,7 +3,13 @@ QT += core gui widgets
 CONFIG += release static
 CONFIG -= debug debug_and_release
 
-TARGET = FxPresser
+isEmpty(FX_VERSION) {
+    FX_VERSION = 2.0
+}
+isEmpty(FX_BUILD_DATE) {
+    FX_BUILD_DATE = local
+}
+TARGET = FxPresser-v$${FX_VERSION}-$${FX_BUILD_DATE}
 TEMPLATE = app
 
 SOURCES += \

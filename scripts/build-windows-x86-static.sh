@@ -4,6 +4,18 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
+FX_VERSION=${FX_VERSION:-$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")}
+FX_BUILD_DATE=${FX_BUILD_DATE:-$(date -u +%Y%m%d)}
+if [[ ! "$FX_VERSION" =~ ^2\.[0-9]+$ ]]; then
+    printf '版本号必须是2.x格式：%s\n' "$FX_VERSION" >&2
+    exit 1
+fi
+if [[ ! "$FX_BUILD_DATE" =~ ^[0-9]{8}$ ]]; then
+    printf '构建日期必须是YYYYMMDD格式：%s\n' "$FX_BUILD_DATE" >&2
+    exit 1
+fi
+OUTPUT_BASENAME="FxPresser-v${FX_VERSION}-${FX_BUILD_DATE}"
+
 QT_VERSION=5.9.9
 QT_ARCHIVE_NAME="qtbase-opensource-src-${QT_VERSION}.tar.xz"
 QT_ARCHIVE_URL="https://download.qt.io/new_archive/qt/5.9/5.9.9/submodules/${QT_ARCHIVE_NAME}"
@@ -16,7 +28,8 @@ QT_BUILD_DIR="$BUILD_ROOT/qtbase-build-${QT_VERSION}"
 QT_INSTALL_DIR="$BUILD_ROOT/qtbase-static-${QT_VERSION}"
 APP_BUILD_DIR="$BUILD_ROOT/fxpresser-build"
 OUTPUT_DIR="$PROJECT_DIR/dist/windows-x86-static"
-OUTPUT_ZIP="$PROJECT_DIR/dist/FxPresser-windows-x86-static.zip"
+OUTPUT_EXE="$OUTPUT_DIR/${OUTPUT_BASENAME}.exe"
+OUTPUT_ZIP="$PROJECT_DIR/dist/${OUTPUT_BASENAME}-windows-x86-static.zip"
 JOBS=${JOBS:-4}
 
 required_commands=(
@@ -97,23 +110,26 @@ gmake -C "$QT_BUILD_DIR" install
 printf '构建 FxPresser 单文件 EXE……\n'
 (
     cd "$APP_BUILD_DIR"
-    "$QT_INSTALL_DIR/bin/qmake" "$PROJECT_DIR/FxPresser-static.pro"
+    "$QT_INSTALL_DIR/bin/qmake" \
+        "FX_VERSION=$FX_VERSION" \
+        "FX_BUILD_DATE=$FX_BUILD_DATE" \
+        "$PROJECT_DIR/FxPresser-static.pro"
     gmake -j"$JOBS"
 )
 
-APP_EXE="$APP_BUILD_DIR/FxPresser.exe"
+APP_EXE="$APP_BUILD_DIR/${OUTPUT_BASENAME}.exe"
 if [[ ! -f "$APP_EXE" ]]; then
     printf '构建失败：未生成 %s\n' "$APP_EXE" >&2
     exit 1
 fi
 
-install -m 0755 "$APP_EXE" "$OUTPUT_DIR/FxPresser.exe"
+install -m 0755 "$APP_EXE" "$OUTPUT_EXE"
 (
     cd "$PROJECT_DIR/dist"
-    zip -9 -q -FS -r "$(basename "$OUTPUT_ZIP")" "$(basename "$OUTPUT_DIR")"
+    zip -9 -q -j -FS "$(basename "$OUTPUT_ZIP")" "$OUTPUT_EXE"
 )
 
 printf '\n构建完成：\n'
-file "$OUTPUT_DIR/FxPresser.exe"
-sha256sum "$OUTPUT_DIR/FxPresser.exe" "$OUTPUT_ZIP"
-printf 'EXE：%s\nZIP：%s\n' "$OUTPUT_DIR/FxPresser.exe" "$OUTPUT_ZIP"
+file "$OUTPUT_EXE"
+sha256sum "$OUTPUT_EXE" "$OUTPUT_ZIP"
+printf 'EXE：%s\nZIP：%s\n' "$OUTPUT_EXE" "$OUTPUT_ZIP"
