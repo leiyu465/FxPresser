@@ -270,12 +270,15 @@ bool FxMainWindow::pressKey(HWND window, UINT code)
     {
         const int holdMilliseconds = randomizedKeyHoldMilliseconds();
         const bool queued = sharedInputWorker->enqueueKey(code, holdMilliseconds);
-        writeLog(QStringLiteral("混合模式降级为后台共享：vk=0x%1, hold=%2ms, ok=%3")
+        writeLog(QStringLiteral("执行模式=共享消息：vk=0x%1, hold=%2ms, ok=%3")
             .arg(code, 0, 16).arg(holdMilliseconds).arg(queued));
         return queued;
     }
 
     const int method = autoForeground ? 4 : 0;
+    const QString effectiveMethodName = autoForeground
+        ? QStringLiteral("键盘+自动窗口")
+        : QStringLiteral("键盘+手动窗口");
     if (autoForeground && !isGameWindowFocused(window))
     {
         // 恢复原“键盘+自动窗口”行为：仅在真正发送按键时激活游戏。
@@ -290,18 +293,18 @@ bool FxMainWindow::pressKey(HWND window, UINT code)
 
     const bool downOk = sendGlobalKey(false, code, method, &errorCode);
     writeLog(QStringLiteral("按键按下：method=%1, vk=0x%2, scan=0x%3, window=0x%4, foreground=%5, ok=%6, error=%7")
-        .arg(currentSendMethodName())
+        .arg(effectiveMethodName)
         .arg(code, 0, 16).arg(scanCode, 0, 16)
         .arg(reinterpret_cast<quintptr>(window), 0, 16)
         .arg(foreground).arg(downOk).arg(errorCode));
 
     const int holdMilliseconds = randomizedKeyHoldMilliseconds();
     QTimer::singleShot(holdMilliseconds, this,
-        [this, code, method]() {
+        [this, code, method, effectiveMethodName]() {
             DWORD upError = ERROR_SUCCESS;
             const bool upOk = sendGlobalKey(true, code, method, &upError);
             writeLog(QStringLiteral("按键释放：method=%1, vk=0x%2, ok=%3, error=%4")
-                .arg(currentSendMethodName())
+                .arg(effectiveMethodName)
                 .arg(code, 0, 16).arg(upOk).arg(upError));
         });
     return downOk;
