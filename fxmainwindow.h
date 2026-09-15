@@ -127,7 +127,7 @@ private:
     //执行某个按键
     bool pressKey(HWND window, UINT code);
     bool isGameWindowFocused(HWND window) const;
-    void updateGameAlwaysOnTop(bool activate);
+    void updateGameAlwaysOnTop();
     void clearGameAlwaysOnTop();
     bool ensureGameWindowValid(HWND window);
     bool sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode);
