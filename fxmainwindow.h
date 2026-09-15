@@ -35,8 +35,8 @@ struct SConfigData
     double fxCD[10]; //单个按键的间隔
     double globalInterval; //Fx排队间隔
     int defaultKey; //缺省技能的位置，没有则为-1
-    int sendMethod; //按键发送方式
     double keyHoldInterval; //KEYDOWN与KEYUP之间的间隔
+    bool alwaysOnTop; //工具窗口总在最前
 
     QString title; //游戏窗口标题
     QByteArray hash; //角色名图片hash
@@ -49,8 +49,8 @@ struct SConfigData
         std::fill(fxCD, fxCD + 10, 1.0);
         globalInterval = 0.1;
         defaultKey = -1;
-        sendMethod = 17; //稳定方法ID，默认使用待验证的“共享状态消息”
         keyHoldInterval = 0.027;
+        alwaysOnTop = false;
 
         x = -1;
         y = -1;
@@ -72,7 +72,7 @@ private:
     QPushButton* btn_change_title;
     QPushButton* btn_switch_to_window;
     QPushButton* btn_show_log;
-    QComboBox* combo_send_method;
+    QCheckBox* check_always_on_top;
     QDoubleSpinBox* spin_key_hold_interval;
     QCheckBox* check_global_switch;
     QDoubleSpinBox* spin_global_interval;
@@ -92,8 +92,6 @@ private:
     std::array<std::chrono::steady_clock::time_point, 10> lastPressedTimePoint;
     //最后一次按键的时间点，用于确定实际按键的时机
     std::chrono::steady_clock::time_point lastAnyPressedTimePoint;
-    //自动前台模式下，工具窗口被用户激活后短暂停止抢回游戏焦点
-    std::chrono::steady_clock::time_point autoForegroundPausedUntil;
     //公平轮询的起始位置，避免固定从F1扫描导致后续按键长期无法触发
     int nextKeyIndex = 0;
     SharedInputWorker* sharedInputWorker;
@@ -127,6 +125,7 @@ private:
     bool tryPressKey(HWND window, int key_index, bool force);
     //执行某个按键
     bool pressKey(HWND window, UINT code);
+    bool isGameWindowFocused(HWND window) const;
     bool ensureGameWindowValid(HWND window);
     bool sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode);
     bool sendLegacyWindowKey(HWND window, UINT code, int method, DWORD* errorCode);

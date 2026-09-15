@@ -2,7 +2,6 @@
 #define SHAREDINPUTWORKER_H
 
 #include <QMutex>
-#include <QQueue>
 #include <QThread>
 #include <QWaitCondition>
 #include <QString>
@@ -34,14 +33,13 @@ private:
         int holdMilliseconds;
     };
 
-    bool sendKey(const KeyCommand& command);
     bool setOneKeyState(UINT virtualKey, bool pressed);
+    bool sendKeyMessage(const KeyCommand& command, bool keyUp, DWORD* errorCode);
 
     QMutex mutex;
-    QWaitCondition commandAvailable;
     QWaitCondition startupFinished;
-    QQueue<KeyCommand> commands;
     HWND targetWindow = nullptr;
+    DWORD workerThreadId = 0;
     bool stopRequested = false;
     bool attached = false;
     bool startupComplete = false;

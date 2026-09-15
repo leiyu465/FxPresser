@@ -43,15 +43,6 @@ FxMainWindow::FxMainWindow(QWidget* parent)
         this, &FxMainWindow::writeLog);
 
     connect(&pressTimer, &QTimer::timeout, this, &FxMainWindow::pressProc);
-    connect(qApp, &QGuiApplication::applicationStateChanged, this,
-        [this](Qt::ApplicationState state) {
-            if (state == Qt::ApplicationActive && check_global_switch->isChecked())
-            {
-                autoForegroundPausedUntil = std::chrono::steady_clock::now() +
-                    std::chrono::milliseconds(1500);
-                writeLog(QStringLiteral("检测到工具窗口获得焦点：自动切换游戏窗口暂停1.5秒"));
-            }
-        });
 
     QDir dir = QCoreApplication::applicationDirPath();
     dir.mkdir(QStringLiteral("config"));
@@ -272,55 +263,19 @@ bool FxMainWindow::tryPressKey(HWND window, int key_index, bool force)
 
 bool FxMainWindow::pressKey(HWND window, UINT code)
 {
-    const int method = combo_send_method->currentData().toInt();
-    if (method == 17)
+    if (!isGameWindowFocused(window))
     {
         const int holdMilliseconds = randomizedKeyHoldMilliseconds();
         const bool queued = sharedInputWorker->enqueueKey(code, holdMilliseconds);
-        writeLog(QStringLiteral("共享状态按键入队：vk=0x%1, hold=%2ms, ok=%3")
+        writeLog(QStringLiteral("混合模式降级为后台共享：vk=0x%1, hold=%2ms, ok=%3")
             .arg(code, 0, 16).arg(holdMilliseconds).arg(queued));
         return queued;
     }
 
-    if (method >= 8)
-    {
-        DWORD errorCode = ERROR_SUCCESS;
-        const bool result = sendLegacyWindowKey(window, code, method, &errorCode);
-        wchar_t title[512] = {};
-        wchar_t className[256] = {};
-        GetWindowTextW(window, title, 512);
-        GetClassNameW(window, className, 256);
-        writeLog(QStringLiteral("窗口消息：method=%1, vk=0x%2, target=0x%3, class=%4, title=%5, foreground=%6, ok=%7, error=%8")
-            .arg(currentSendMethodName()).arg(code, 0, 16)
-            .arg(reinterpret_cast<quintptr>(window), 0, 16)
-            .arg(QString::fromWCharArray(className), QString::fromWCharArray(title))
-            .arg(GetForegroundWindow() == window).arg(result).arg(errorCode));
-        return result;
-    }
-
-    const bool autoActivateWindow = method >= 4;
-    if (autoActivateWindow && std::chrono::steady_clock::now() < autoForegroundPausedUntil)
-    {
-        return false;
-    }
-
-    if (autoActivateWindow && GetForegroundWindow() != window)
-    {
-        if (IsIconic(window))
-            ShowWindow(window, SW_RESTORE);
-        SetForegroundWindow(window);
-    }
-
-    if (GetForegroundWindow() != window)
-    {
-        writeLog(QStringLiteral("全局输入已取消：游戏窗口不在前台，handle=0x%1, method=%2")
-            .arg(reinterpret_cast<quintptr>(window), 0, 16)
-            .arg(currentSendMethodName()));
-        return false;
-    }
+    const int method = 0; //游戏位于前台且拥有焦点时使用原“键盘+手动”SendInput。
 
     const UINT scanCode = MapVirtualKeyW(code, MAPVK_VK_TO_VSC);
-    const bool foreground = GetForegroundWindow() == window;
+    const bool foreground = true;
     DWORD errorCode = ERROR_SUCCESS;
 
     const bool downOk = sendGlobalKey(false, code, method, &errorCode);
@@ -340,6 +295,20 @@ bool FxMainWindow::pressKey(HWND window, UINT code)
                 .arg(code, 0, 16).arg(upOk).arg(upError));
         });
     return downOk;
+}
+
+bool FxMainWindow::isGameWindowFocused(HWND window) const
+{
+    const HWND foreground = GetForegroundWindow();
+    if (!foreground || GetAncestor(foreground, GA_ROOT) != window)
+        return false;
+
+    const DWORD gameThreadId = GetWindowThreadProcessId(window, nullptr);
+    GUITHREADINFO info = {};
+    info.cbSize = sizeof(info);
+    if (!GetGUIThreadInfo(gameThreadId, &info) || !info.hwndFocus)
+        return false;
+    return GetAncestor(info.hwndFocus, GA_ROOT) == window;
 }
 
 bool FxMainWindow::ensureGameWindowValid(HWND window)
@@ -480,7 +449,7 @@ bool FxMainWindow::sendGlobalKey(bool keyUp, UINT code, int method, DWORD* error
 
 QString FxMainWindow::currentSendMethodName() const
 {
-    return combo_send_method->currentText();
+    return QStringLiteral("混合按键模式");
 }
 
 void FxMainWindow::writeLog(const QString& message)
@@ -655,8 +624,8 @@ SConfigData FxMainWindow::makeConfigFromUI()
 
     result.globalInterval = spin_global_interval->value();
     result.defaultKey = currentDefaultKey;
-    result.sendMethod = combo_send_method->currentData().toInt();
     result.keyHoldInterval = spin_key_hold_interval->value();
+    result.alwaysOnTop = check_always_on_top->isChecked();
 
     result.hash = currentHash;
     result.title = line_title->text();
@@ -678,11 +647,8 @@ void FxMainWindow::applyConfigToUI(const SConfigData& config)
     }
 
     spin_global_interval->setValue(config.globalInterval);
-    int sendMethodIndex = combo_send_method->findData(config.sendMethod);
-    if (sendMethodIndex < 0)
-        sendMethodIndex = combo_send_method->findData(17);
-    combo_send_method->setCurrentIndex(sendMethodIndex);
     spin_key_hold_interval->setValue(config.keyHoldInterval);
+    check_always_on_top->setChecked(config.alwaysOnTop);
 
     currentDefaultKey = config.defaultKey;
     for (int index = 0; index < 10; ++index)
@@ -723,8 +689,8 @@ QJsonObject FxMainWindow::configToJson(const SConfigData& config)
 
     result["Interval"] = config.globalInterval;
     result["DefaultKey"] = config.defaultKey;
-    result["SendMethodId"] = config.sendMethod;
     result["KeyHoldInterval"] = config.keyHoldInterval;
+    result["AlwaysOnTop"] = config.alwaysOnTop;
 
     result["X"] = config.x;
     result["Y"] = config.y;
@@ -755,18 +721,8 @@ SConfigData FxMainWindow::jsonToConfig(QJsonObject json)
 
     result.globalInterval = json.take("Interval").toDouble(0.1);
     result.defaultKey = json.take("DefaultKey").toInt(-1);
-    if (json.contains("SendMethodId"))
-    {
-        result.sendMethod = json.take("SendMethodId").toInt(17);
-    }
-    else
-    {
-        // 兼容旧配置中保存的下拉框索引：自动、手动、按键消息、keyup消息。
-        const int legacyIndex = json.take("SendMethod").toInt(2);
-        const int legacyMethods[] = { 4, 0, 14, 8 };
-        result.sendMethod = legacyIndex >= 0 && legacyIndex < 4 ? legacyMethods[legacyIndex] : 17;
-    }
     result.keyHoldInterval = json.take("KeyHoldInterval").toDouble(0.027);
+    result.alwaysOnTop = json.take("AlwaysOnTop").toBool(false);
 
     result.x = json.take("X").toInt(-1);
     result.y = json.take("Y").toInt(-1);
@@ -876,42 +832,15 @@ void FxMainWindow::setupUI()
         });
     vlayout_main->addWidget(btn_switch_to_window);
 
-    auto hlayout_send_method = new QHBoxLayout;
-    combo_send_method = new QComboBox;
-    combo_send_method->addItem(QStringLiteral("共享状态消息"), 17);
-    combo_send_method->addItem(QStringLiteral("键盘+自动"), 4);
-    combo_send_method->addItem(QStringLiteral("键盘+手动"), 0);
-
-    // 以下方式已经实机验证无效：从下拉框移除，但发送实现仍保留。
-    // combo_send_method->addItem(QStringLiteral("keyup消息"), 8);
-    // combo_send_method->addItem(QStringLiteral("按键消息"), 14);
-    // combo_send_method->addItem(QStringLiteral("按键消息（0）"), 15);
-    // combo_send_method->addItem(QStringLiteral("双释放消息"), 16);
-
-    // 以下实验方式保留实现，仅从界面下拉框隐藏，后续需要时可直接恢复。
-    // combo_send_method->addItem(QStringLiteral("SendInput / 扫描码 / 手动保持前台"), 1);
-    // combo_send_method->addItem(QStringLiteral("keybd_event / VK / 手动保持前台"), 2);
-    // combo_send_method->addItem(QStringLiteral("keybd_event / 扫描码 / 手动保持前台"), 3);
-    // combo_send_method->addItem(QStringLiteral("SendInput / 扫描码 / 自动切换前台"), 5);
-    // combo_send_method->addItem(QStringLiteral("keybd_event / VK / 自动切换前台"), 6);
-    // combo_send_method->addItem(QStringLiteral("keybd_event / 扫描码 / 自动切换前台"), 7);
-    // combo_send_method->addItem(QStringLiteral("旧版：右键按下 + KEYUP"), 9);
-    // combo_send_method->addItem(QStringLiteral("完整右键点击 + KEYUP"), 10);
-    // combo_send_method->addItem(QStringLiteral("首个子窗口 / 仅 KEYUP"), 11);
-    // combo_send_method->addItem(QStringLiteral("首个子窗口 / 右键按下 + KEYUP"), 12);
-    // combo_send_method->addItem(QStringLiteral("SendNotifyMessageA / 仅 KEYUP"), 13);
-    combo_send_method->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    combo_send_method->setMinimumContentsLength(0);
-    combo_send_method->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    connect(combo_send_method, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
-        [this](int) {
-            if (check_global_switch->isChecked())
-                check_global_switch->setChecked(false);
-            writeLog(QStringLiteral("切换按键发送方式：%1").arg(currentSendMethodName()));
-        });
-    hlayout_send_method->addWidget(new QLabel(QStringLiteral("按键方式")));
-    hlayout_send_method->addWidget(combo_send_method, 1);
-    vlayout_main->addLayout(hlayout_send_method);
+    check_always_on_top = new QCheckBox(QStringLiteral("总在最前"));
+    connect(check_always_on_top, &QCheckBox::toggled, this, [this](bool checked) {
+        const QPoint oldPosition = pos();
+        setWindowFlag(Qt::WindowStaysOnTopHint, checked);
+        move(oldPosition);
+        show();
+        writeLog(QStringLiteral("总在最前：%1").arg(checked));
+    });
+    vlayout_main->addWidget(check_always_on_top);
 
     spin_key_hold_interval = new QDoubleSpinBox;
     spin_key_hold_interval->setSuffix(QStringLiteral(" s"));
@@ -953,8 +882,7 @@ void FxMainWindow::setupUI()
                 if (!ensureGameWindowValid(gameWindows[windowIndex]))
                     return;
 
-                if (combo_send_method->currentData().toInt() == 17 &&
-                    !sharedInputWorker->startForWindow(gameWindows[windowIndex]))
+                if (!sharedInputWorker->startForWindow(gameWindows[windowIndex]))
                 {
                     check_global_switch->setChecked(false);
                     QMessageBox::warning(this,
