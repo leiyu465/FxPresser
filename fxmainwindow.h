@@ -36,7 +36,7 @@ struct SConfigData
     double globalInterval; //Fx排队间隔
     int defaultKey; //缺省技能的位置，没有则为-1
     double keyHoldInterval; //KEYDOWN与KEYUP之间的间隔
-    bool alwaysOnTop; //工具窗口总在最前
+    bool alwaysOnTop; //选中的游戏窗口总在最前
 
     QString title; //游戏窗口标题
     QByteArray hash; //角色名图片hash
@@ -100,6 +100,7 @@ private:
     QVector<HWND> gameWindows;
     QVector<QImage> playerNameImages;
     QVector<QByteArray> playerNameHashes;
+    HWND alwaysOnTopWindow = nullptr;
 
     //当前游戏窗口的数据
     QByteArray currentHash;
@@ -126,6 +127,8 @@ private:
     //执行某个按键
     bool pressKey(HWND window, UINT code);
     bool isGameWindowFocused(HWND window) const;
+    void updateGameAlwaysOnTop(bool activate);
+    void clearGameAlwaysOnTop();
     bool ensureGameWindowValid(HWND window);
     bool sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode);
     bool sendLegacyWindowKey(HWND window, UINT code, int method, DWORD* errorCode);

@@ -66,6 +66,7 @@ FxMainWindow::~FxMainWindow()
 {
     pressTimer.stop();
     sharedInputWorker->stopForWindow();
+    clearGameAlwaysOnTop();
 
     writeLog(QStringLiteral("程序退出，保存配置"));
     autoWriteConfig();
@@ -101,6 +102,10 @@ void FxMainWindow::autoSelectAndRenameGameWindow(const QByteArray& hash)
 
 void FxMainWindow::pressProc()
 {
+    // “总在最前”只在自动运行期间持续抢回游戏焦点，避免未运行时妨碍用户操作。
+    if (check_global_switch->isChecked() && check_always_on_top->isChecked())
+        updateGameAlwaysOnTop(true);
+
     if (!check_global_switch->isChecked())
     {
         return;
@@ -160,6 +165,7 @@ void FxMainWindow::scanGameWindows()
 
     int found = 0, invalid = 0;
 
+    clearGameAlwaysOnTop();
     gameWindows.clear();
     playerNameImages.clear();
     playerNameHashes.clear();
@@ -309,6 +315,42 @@ bool FxMainWindow::isGameWindowFocused(HWND window) const
     if (!GetGUIThreadInfo(gameThreadId, &info) || !info.hwndFocus)
         return false;
     return GetAncestor(info.hwndFocus, GA_ROOT) == window;
+}
+
+void FxMainWindow::clearGameAlwaysOnTop()
+{
+    if (alwaysOnTopWindow && IsWindow(alwaysOnTopWindow))
+    {
+        SetWindowPos(alwaysOnTopWindow, HWND_NOTOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    alwaysOnTopWindow = nullptr;
+}
+
+void FxMainWindow::updateGameAlwaysOnTop(bool activate)
+{
+    const int index = combo_windows->currentIndex();
+    if (index < 0 || index >= gameWindows.size())
+        return;
+
+    HWND window = gameWindows[index];
+    if (!IsWindow(window))
+        return;
+
+    if (alwaysOnTopWindow != window)
+    {
+        clearGameAlwaysOnTop();
+        alwaysOnTopWindow = window;
+    }
+
+    SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | (activate ? 0 : SWP_NOACTIVATE));
+    if (activate && !isGameWindowFocused(window))
+    {
+        if (IsIconic(window))
+            ShowWindow(window, SW_RESTORE);
+        SetForegroundWindow(window);
+    }
 }
 
 bool FxMainWindow::ensureGameWindowValid(HWND window)
@@ -801,9 +843,13 @@ void FxMainWindow::setupUI()
         {
             check_global_switch->setChecked(false);
 
+            clearGameAlwaysOnTop();
+
             if (index != -1)
             {
                 currentHash = playerNameHashes[index];
+                if (check_always_on_top->isChecked())
+                    updateGameAlwaysOnTop(false);
             }
         });
     vlayout_main->addWidget(combo_windows);
@@ -834,11 +880,11 @@ void FxMainWindow::setupUI()
 
     check_always_on_top = new QCheckBox(QStringLiteral("总在最前"));
     connect(check_always_on_top, &QCheckBox::toggled, this, [this](bool checked) {
-        const QPoint oldPosition = pos();
-        setWindowFlag(Qt::WindowStaysOnTopHint, checked);
-        move(oldPosition);
-        show();
-        writeLog(QStringLiteral("总在最前：%1").arg(checked));
+        if (checked)
+            updateGameAlwaysOnTop(check_global_switch->isChecked());
+        else
+            clearGameAlwaysOnTop();
+        writeLog(QStringLiteral("游戏总在最前：%1").arg(checked));
     });
     vlayout_main->addWidget(check_always_on_top);
 
