@@ -286,6 +286,7 @@ void FxMainWindow::scanGameWindows()
 {
     stopAutomation();
     clearGameTopmost();
+    automation.setTargetWindow(nullptr);
     windowManager.setCurrentWindow(nullptr);
     comboWindows->blockSignals(true);
     comboWindows->clear();
@@ -360,10 +361,12 @@ void FxMainWindow::selectWindow(int index)
     clearGameTopmost();
     if (index < 0 || index >= gameWindows.size())
     {
+        automation.setTargetWindow(nullptr);
         windowManager.setCurrentWindow(nullptr);
         return;
     }
     windowManager.setCurrentWindow(gameWindows[index]);
+    automation.setTargetWindow(gameWindows[index]);
     currentHash = playerNameHashes[index];
     if (btnGameTopmost->isChecked())
         applyGameTopmost(true);

@@ -6,6 +6,7 @@
 
 #include <QObject>
 #include <QString>
+#include <mutex>
 #include <windows.h>
 
 class GameWindowManager;
@@ -74,19 +75,24 @@ public:
         QObject* parent = nullptr);
     ~KeyExecutionService() override;
 
-    bool startSession(HWND window);
-    void stopSession();
+    void setTargetWindow(HWND window);
     KeyResult executeKey(const KeyRequest& request);
 
 signals:
     void debugMessage(const QString& message, bool failed);
 
 private:
+    void synchronizeSharedInput();
+    void synchronizeSharedInputLocked();
+
     InputModeManager& modes;
     SharedInputWorker sharedWorker;
     SharedMessageKeyExecutor sharedExecutor;
     AutoWindowKeyExecutor autoExecutor;
     ManualWindowKeyExecutor manualExecutor;
+    std::mutex resourceMutex;
+    HWND targetWindow = nullptr;
+    HWND attachedWindow = nullptr;
 };
 
 #endif // KEYEXECUTOR_H

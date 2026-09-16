@@ -24,6 +24,7 @@ public:
     bool start();
     void stop();
     bool isRunning() const;
+    void setTargetWindow(HWND window);
 
 signals:
     void runningChanged(bool running);

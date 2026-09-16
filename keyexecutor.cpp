@@ -96,29 +96,48 @@ KeyExecutionService::KeyExecutionService(InputModeManager& modeManager,
 {
     connect(&sharedWorker, &SharedInputWorker::debugMessage,
         this, &KeyExecutionService::debugMessage);
+    connect(&modes, &InputModeManager::modeChanged,
+        this, [this](InputMode) { synchronizeSharedInput(); }, Qt::DirectConnection);
 }
 
 KeyExecutionService::~KeyExecutionService()
 {
-    stopSession();
-}
-
-bool KeyExecutionService::startSession(HWND window)
-{
-    return sharedWorker.startForWindow(window);
-}
-
-void KeyExecutionService::stopSession()
-{
+    disconnect(&modes, nullptr, this, nullptr);
+    std::lock_guard<std::mutex> locker(resourceMutex);
     sharedWorker.stopForWindow();
+    attachedWindow = nullptr;
+}
+
+void KeyExecutionService::setTargetWindow(HWND window)
+{
+    std::lock_guard<std::mutex> locker(resourceMutex);
+    targetWindow = window;
+    synchronizeSharedInputLocked();
+}
+
+void KeyExecutionService::synchronizeSharedInput()
+{
+    std::lock_guard<std::mutex> locker(resourceMutex);
+    synchronizeSharedInputLocked();
 }
 
 KeyResult KeyExecutionService::executeKey(const KeyRequest& request)
 {
+    // 模式资源切换与完整按键互斥，避免共享按键执行到一半被Detach。
+    std::lock_guard<std::mutex> locker(resourceMutex);
+    synchronizeSharedInputLocked();
     const InputMode mode = modes.currentMode();
     switch (mode)
     {
     case InputMode::SharedMessage:
+        if (attachedWindow != request.window)
+        {
+            KeyResult result;
+            result.mode = mode;
+            result.errorCode = ERROR_INVALID_STATE;
+            result.detail = QStringLiteral("共享输入尚未Attach到当前窗口");
+            return result;
+        }
         return sharedExecutor.execute(request);
     case InputMode::KeyboardAutoWindow:
         return autoExecutor.execute(request);
@@ -131,4 +150,22 @@ KeyResult KeyExecutionService::executeKey(const KeyRequest& request)
     result.errorCode = ERROR_INVALID_PARAMETER;
     result.detail = QStringLiteral("未注册的按键方式");
     return result;
+}
+
+void KeyExecutionService::synchronizeSharedInputLocked()
+{
+    const bool needsSharedInput = modes.currentMode() == InputMode::SharedMessage &&
+        targetWindow && IsWindow(targetWindow) != FALSE;
+
+    if (attachedWindow && (!needsSharedInput || attachedWindow != targetWindow))
+    {
+        sharedWorker.stopForWindow();
+        attachedWindow = nullptr;
+    }
+
+    if (needsSharedInput && !attachedWindow)
+    {
+        if (sharedWorker.startForWindow(targetWindow))
+            attachedWindow = targetWindow;
+    }
 }

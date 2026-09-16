@@ -28,13 +28,6 @@ bool AutomationController::start()
     if (!window || IsWindow(window) == FALSE)
         return false;
 
-    // 已确认：无论当前模式是什么，全局开关开启时都先Attach。
-    if (!execution.startSession(window))
-    {
-        execution.stopSession();
-        return false;
-    }
-
     scheduler = new KeyScheduler(window, keys, times, execution, this);
     connect(scheduler, &KeyScheduler::keyExecuted,
         this, &AutomationController::keyExecuted);
@@ -47,16 +40,12 @@ bool AutomationController::start()
 void AutomationController::stop()
 {
     if (!scheduler)
-    {
-        execution.stopSession();
         return;
-    }
 
     scheduler->requestStop();
     scheduler->wait();
     delete scheduler;
     scheduler = nullptr;
-    execution.stopSession();
     emit runningChanged(false);
     emit debugMessage(QStringLiteral("自动按键调度已停止"), false);
 }
@@ -64,4 +53,9 @@ void AutomationController::stop()
 bool AutomationController::isRunning() const
 {
     return scheduler != nullptr;
+}
+
+void AutomationController::setTargetWindow(HWND window)
+{
+    execution.setTargetWindow(window);
 }
