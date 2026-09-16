@@ -1,516 +1,474 @@
-﻿#include "fxmainwindow.h"
-#include "sharedinputworker.h"
-#include <QCoreApplication>
-#include <QDir>
-#include <QFile>
-#include <QMessageBox>
-#include <QStyledItemDelegate>
-#include <QPainter>
-#include <QCryptographicHash>
+#include "fxmainwindow.h"
+
 #include <QApplication>
+#include <QCoreApplication>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDialog>
-#include <QTextEdit>
+#include <QDialogButtonBox>
+#include <QDir>
+#include <QDoubleSpinBox>
+#include <QFile>
+#include <QFileInfo>
+#include <QFrame>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QKeySequenceEdit>
+#include <QDataStream>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QPainter>
+#include <QPushButton>
+#include <QStackedWidget>
+#include <QStyledItemDelegate>
+#include <QTextCharFormat>
 #include <QTextCursor>
+#include <QTextEdit>
 #include <QToolButton>
-#include <random>
-//角色名取样区域
-static const QRect playerNameRect{ 80,22,90,14 };
+#include <QVBoxLayout>
+
+namespace
+{
+const QRect PlayerNameRect{80, 22, 90, 14};
 
 class CharacterBoxDelegate : public QStyledItemDelegate
 {
 public:
-    CharacterBoxDelegate(QObject* parent = nullptr)
-        : QStyledItemDelegate(parent) {}
+    using QStyledItemDelegate::QStyledItemDelegate;
 
-    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+        const QModelIndex& index) const override
     {
-        auto o = option;
-        initStyleOption(&o, index);
-        o.decorationSize.setWidth(o.rect.width());
-        auto style = o.widget ? o.widget->style() : QApplication::style();
-        style->drawControl(QStyle::CE_ItemViewItem, &o, painter, o.widget);
+        QStyleOptionViewItem adjusted = option;
+        initStyleOption(&adjusted, index);
+        adjusted.decorationSize.setWidth(adjusted.rect.width());
+        QStyle* style = adjusted.widget ? adjusted.widget->style() : QApplication::style();
+        style->drawControl(QStyle::CE_ItemViewItem, &adjusted, painter, adjusted.widget);
     }
 };
 
+QFrame* horizontalLine()
+{
+    QFrame* line = new QFrame;
+    line->setFrameShape(QFrame::HLine);
+    line->setFrameShadow(QFrame::Sunken);
+    return line;
+}
+}
+
 FxMainWindow::FxMainWindow(QWidget* parent)
-    : QMainWindow(parent)
+    : QMainWindow(parent), modeManager(windowManager, nullptr),
+      automation(windowManager, modeManager, keyConfig, timeConfig, nullptr),
+      hotkeyManager(nullptr)
 {
     setupUI();
+    connectRuntime();
 
-    sharedInputWorker = new SharedInputWorker(this);
-    connect(sharedInputWorker, &SharedInputWorker::debugMessage,
-        this, &FxMainWindow::writeLog);
+    QDir(QCoreApplication::applicationDirPath()).mkdir(QStringLiteral("config"));
+    const SConfigData config = readConfig(getConfigPath());
+    applyConfigToUI(config);
 
-    connect(&pressTimer, &QTimer::timeout, this, &FxMainWindow::pressProc);
-
-    QDir dir = QCoreApplication::applicationDirPath();
-    dir.mkdir(QStringLiteral("config"));
-
-    //读取参数
-    loadConfig();
-
-    writeLog(QStringLiteral("程序启动，按键发送方式：%1").arg(currentSendMethodName()));
-
-    //扫描游戏窗口
     scanGameWindows();
-
-    //首次自动选择游戏窗口
     autoSelectAndRenameGameWindow(currentHash);
+    updateModeUI();
 
-    pressTimer.setTimerType(Qt::PreciseTimer);
-    pressTimer.start(50);
+    QString shortcutError;
+    if (!hotkeyManager.setShortcut(config.globalShortcut, &shortcutError))
+        writeLog(shortcutError, true);
 }
 
 FxMainWindow::~FxMainWindow()
 {
-    pressTimer.stop();
-    sharedInputWorker->stopForWindow();
-    clearGameAlwaysOnTop();
-
-    writeLog(QStringLiteral("程序退出，保存配置"));
-    autoWriteConfig();
+    stopAutomation();
+    clearGameTopmost();
+    writeConfig(getConfigPath(), makeConfigFromUI());
 }
 
-void FxMainWindow::autoSelectAndRenameGameWindow(const QByteArray& hash)
+void FxMainWindow::connectRuntime()
 {
-    int index = -1;
+    connect(&modeManager, &InputModeManager::modeChanged,
+        this, [this](InputMode mode) {
+            updateModeUI();
+            writeLog(QStringLiteral("自动选择方式：%1").arg(InputModeManager::displayName(mode)));
+        });
 
-    if (!gameWindows.isEmpty())
-    {
-        if (!hash.isEmpty())
-        {
-            for (int hash_index = 0; hash_index < playerNameImages.size(); ++hash_index)
-            {
-                if (playerNameHashes[hash_index] == hash)
-                {
-                    index = hash_index;
-                    break;
-                }
-            }
-        }
-    }
+    connect(&automation, &AutomationController::runningChanged,
+        this, [this](bool running) {
+            btnStartStop->setText(running ? QStringLiteral("停止") : QStringLiteral("开始"));
+        });
+    connect(&automation, &AutomationController::debugMessage,
+        this, &FxMainWindow::writeLog);
+    connect(&automation, &AutomationController::keyExecuted,
+        this, [this](int keyNumber, InputMode mode, bool success,
+            DWORD errorCode, const QString& detail) {
+            writeLog(QStringLiteral("F%1 · %2 · %3 · error=%4 · %5")
+                .arg(keyNumber).arg(InputModeManager::displayName(mode))
+                .arg(success ? QStringLiteral("成功") : QStringLiteral("失败"))
+                .arg(errorCode).arg(detail), !success);
+        });
 
-    combo_windows->setCurrentIndex(index);
-
-    //找到窗口之后自动更改窗口标题
-    if (index != -1)
-    {
-        changeWindowTitle();
-    }
+    connect(&hotkeyManager, &GlobalHotkeyManager::activated,
+        this, &FxMainWindow::toggleAutomation);
 }
 
-void FxMainWindow::pressProc()
+void FxMainWindow::setupUI()
 {
-    if (!check_global_switch->isChecked())
+    QWidget* mainWidget = new QWidget;
+    QVBoxLayout* mainLayout = new QVBoxLayout(mainWidget);
+    auto makeHelpButton = [this](const QString& title, const QString& text) {
+        QToolButton* button = new QToolButton;
+        button->setText(QStringLiteral("?"));
+        button->setFixedSize(18, 18);
+        button->setToolTip(QStringLiteral("点击查看计算逻辑"));
+        connect(button, &QToolButton::clicked, this, [this, title, text]() {
+            QMessageBox::information(this, title, text);
+        });
+        return button;
+    };
+
+    QHBoxLayout* scanRow = new QHBoxLayout;
+    btnScan = new QPushButton(QStringLiteral("扫描游戏窗口"));
+    btnGameTopmost = new QToolButton;
+    btnGameTopmost->setCheckable(true);
+    btnGameTopmost->setFixedSize(28, 28);
+    btnGameTopmost->setToolTip(QStringLiteral("游戏窗口置顶"));
+    scanRow->addWidget(btnScan, 1);
+    scanRow->addWidget(btnGameTopmost, 0, Qt::AlignRight | Qt::AlignTop);
+    mainLayout->addLayout(scanRow);
+
+    comboWindows = new QComboBox;
+    comboWindows->setIconSize(PlayerNameRect.size());
+    comboWindows->setItemDelegate(new CharacterBoxDelegate(comboWindows));
+    mainLayout->addWidget(comboWindows);
+
+    QHBoxLayout* titleRow = new QHBoxLayout;
+    titleRow->addWidget(new QLabel(QStringLiteral("窗口标题")));
+    lineTitle = new QLineEdit;
+    titleRow->addWidget(lineTitle, 1);
+    mainLayout->addLayout(titleRow);
+
+    btnChangeTitle = new QPushButton(QStringLiteral("修改窗口标题"));
+    btnSwitchToWindow = new QPushButton(QStringLiteral("切换到游戏窗口"));
+    mainLayout->addWidget(btnChangeTitle);
+    mainLayout->addWidget(btnSwitchToWindow);
+
+    checkAutomaticMode = new QCheckBox(QStringLiteral("自动选择"));
+    comboInputMode = new QComboBox;
+    comboInputMode->addItem(QStringLiteral("共享消息"), static_cast<int>(InputMode::SharedMessage));
+    comboInputMode->addItem(QStringLiteral("按键+自动窗口"), static_cast<int>(InputMode::KeyboardAutoWindow));
+    comboInputMode->addItem(QStringLiteral("按键+手动窗口"), static_cast<int>(InputMode::KeyboardManualWindow));
+    comboInputMode->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    labelAutomaticMode = new QLabel;
+    labelAutomaticMode->setAlignment(Qt::AlignCenter);
+    modeStack = new QStackedWidget;
+    modeStack->addWidget(comboInputMode);
+    modeStack->addWidget(labelAutomaticMode);
+    QHBoxLayout* modeRow = new QHBoxLayout;
+    modeRow->addWidget(checkAutomaticMode);
+    modeRow->addWidget(modeStack, 1);
+    mainLayout->addLayout(modeRow);
+
+    spinReleaseInterval = new QDoubleSpinBox;
+    spinReleaseInterval->setSuffix(QStringLiteral(" s"));
+    spinReleaseInterval->setDecimals(3);
+    spinReleaseInterval->setRange(-5.0, 5.0);
+    spinReleaseInterval->setSingleStep(0.001);
+    QHBoxLayout* releaseRow = new QHBoxLayout;
+    releaseRow->addWidget(new QLabel(QStringLiteral("释放间隔")));
+    releaseRow->addWidget(makeHelpButton(QStringLiteral("释放间隔"),
+        QStringLiteral("完整按键会先发送DOWN，再等待释放间隔，最后发送UP。\n\n"
+                       "实际值 = 当前设置值 + -2ms至+2ms随机范围；结果小于1ms时不延迟。")));
+    releaseRow->addWidget(spinReleaseInterval);
+    mainLayout->addLayout(releaseRow);
+
+    mainLayout->addWidget(horizontalLine());
+
+    btnStartStop = new QPushButton(QStringLiteral("开始"));
+    QFont startFont = btnStartStop->font();
+    startFont.setPointSize(16);
+    startFont.setBold(true);
+    btnStartStop->setFont(startFont);
+    btnStartStop->setMinimumHeight(48);
+    mainLayout->addWidget(btnStartStop);
+
+    spinGlobalInterval = new QDoubleSpinBox;
+    spinGlobalInterval->setSuffix(QStringLiteral(" s"));
+    spinGlobalInterval->setDecimals(2);
+    spinGlobalInterval->setRange(0.0, 365.0);
+    spinGlobalInterval->setSingleStep(0.01);
+    QHBoxLayout* globalRow = new QHBoxLayout;
+    globalRow->addWidget(new QLabel(QStringLiteral("全局间隔")));
+    globalRow->addWidget(makeHelpButton(QStringLiteral("全局间隔"),
+        QStringLiteral("每执行完一个完整按键后，等待该时间，再继续检查下一个按键。\n\n"
+                       "运行中修改后，下一次等待使用新值。")));
+    globalRow->addWidget(spinGlobalInterval);
+    mainLayout->addLayout(globalRow);
+
+    mainLayout->addWidget(horizontalLine());
+    QGridLayout* keyGrid = new QGridLayout;
+    keyGrid->addWidget(new QLabel(QStringLiteral("启用")), 0, 0);
+    QWidget* keyIntervalHeader = new QWidget;
+    QHBoxLayout* keyIntervalHeaderLayout = new QHBoxLayout(keyIntervalHeader);
+    keyIntervalHeaderLayout->setContentsMargins(0, 0, 0, 0);
+    keyIntervalHeaderLayout->setSpacing(2);
+    keyIntervalHeaderLayout->addWidget(new QLabel(QStringLiteral("间隔")));
+    keyIntervalHeaderLayout->addWidget(makeHelpButton(QStringLiteral("单键间隔"),
+        QStringLiteral("循环到该按键时，当前时间距离该键上次KEYDOWN调度时间达到此间隔才会执行。\n\n"
+                       "未到期时直接跳过；运行中修改后立即参与下一次判断。")));
+    keyGrid->addWidget(keyIntervalHeader, 0, 1);
+    for (int index = 0; index < 10; ++index)
     {
-        return;
+        keyChecks[index] = new QCheckBox(QStringLiteral("F%1").arg(index + 1));
+        keyIntervals[index] = new QDoubleSpinBox;
+        keyIntervals[index]->setSuffix(QStringLiteral(" s"));
+        keyIntervals[index]->setDecimals(1);
+        keyIntervals[index]->setRange(0.0, 365.0);
+        keyIntervals[index]->setSingleStep(0.1);
+        keyGrid->addWidget(keyChecks[index], index + 1, 0);
+        keyGrid->addWidget(keyIntervals[index], index + 1, 1);
     }
+    mainLayout->addLayout(keyGrid);
 
-    int window_index = combo_windows->currentIndex();
+    btnShortcut = new QPushButton(QStringLiteral("设置全局快捷键"));
+    btnShowLog = new QPushButton(QStringLiteral("查看调试日志"));
+    mainLayout->addWidget(btnShortcut);
+    mainLayout->addWidget(btnShowLog);
 
-    if (window_index == -1)
+    setCentralWidget(mainWidget);
+    setMinimumWidth(160);
+    setMaximumWidth(200);
+    resize(200, sizeHint().height());
+
+    connect(btnScan, &QPushButton::clicked, this, [this]() {
+        scanGameWindows();
+        if (!gameWindows.isEmpty())
+            autoSelectAndRenameGameWindow(currentHash);
+    });
+    connect(comboWindows, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+        this, &FxMainWindow::selectWindow);
+    connect(btnChangeTitle, &QPushButton::clicked, this, &FxMainWindow::changeWindowTitle);
+    connect(btnSwitchToWindow, &QPushButton::clicked, this, [this]() {
+        windowManager.activate(windowManager.currentWindow());
+    });
+    connect(btnGameTopmost, &QToolButton::toggled,
+        this, &FxMainWindow::applyGameTopmost);
+    connect(checkAutomaticMode, &QCheckBox::toggled, this, [this](bool checked) {
+        modeManager.setAutomatic(checked);
+        updateModeUI();
+    });
+    connect(comboInputMode, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+        this, [this](int) {
+            modeManager.setManualMode(static_cast<InputMode>(comboInputMode->currentData().toInt()));
+        });
+    connect(spinReleaseInterval, static_cast<void(QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+        this, [this](double value) { timeConfig.setReleaseIntervalSeconds(value); });
+    connect(spinGlobalInterval, static_cast<void(QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+        this, [this](double value) { timeConfig.setGlobalIntervalSeconds(value); });
+    for (int index = 0; index < 10; ++index)
     {
-        return;
+        connect(keyChecks[index], &QCheckBox::toggled, this,
+            [this, index](bool enabled) { keyConfig.setEnabled(index, enabled); });
+        connect(keyIntervals[index], static_cast<void(QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+            this, [this, index](double value) { timeConfig.setKeyIntervalSeconds(index, value); });
     }
-
-    HWND gameWindow = gameWindows[window_index];
-
-    if (currentDefaultKey != -1 && !defaultKeyTriggered && key_checks[currentDefaultKey]->isChecked())
-    {
-        tryPressKey(gameWindow, currentDefaultKey, true);
-        defaultKeyTriggered = true;
-
-    }
-
-    //每轮从上次成功按键的下一个位置开始，并且最多触发一个按键。
-    //旧逻辑固定从F1开始扫描，前面的按键会不断刷新全局时间戳，
-    //使后面的按键在部分间隔组合下永久没有触发机会。
-    for (int offset = 0; offset < 10; ++offset)
-    {
-        const int key_index = (nextKeyIndex + offset) % 10;
-        if (key_index == currentDefaultKey || !key_checks[key_index]->isChecked())
-        {
-            continue;
-        }
-
-        if (tryPressKey(gameWindow, key_index, false))
-        {
-            nextKeyIndex = (key_index + 1) % 10;
-            break;
-        }
-    }
-}
-
-void FxMainWindow::resetTimeStamp(int index)
-{
-    lastPressedTimePoint[index] = std::chrono::steady_clock::now();
-}
-
-void FxMainWindow::resetAllTimeStamps()
-{
-    //为了实现点击全局开关时自动触发一次，此处将每个按键的上次时间设为0
-    lastPressedTimePoint.fill(std::chrono::steady_clock::time_point());
-    lastAnyPressedTimePoint = std::chrono::steady_clock::time_point();
-    nextKeyIndex = 0;
+    connect(btnStartStop, &QPushButton::clicked, this, &FxMainWindow::toggleAutomation);
+    connect(btnShortcut, &QPushButton::clicked, this, &FxMainWindow::showShortcutDialog);
+    connect(btnShowLog, &QPushButton::clicked, this, &FxMainWindow::showLogWindow);
 }
 
 void FxMainWindow::scanGameWindows()
 {
-    wchar_t c_string[512];
-
-    int found = 0, invalid = 0;
-
-    clearGameAlwaysOnTop();
+    stopAutomation();
+    clearGameTopmost();
+    windowManager.setCurrentWindow(nullptr);
+    comboWindows->blockSignals(true);
+    comboWindows->clear();
     gameWindows.clear();
     playerNameImages.clear();
     playerNameHashes.clear();
-    combo_windows->clear();
-    check_global_switch->setChecked(false);
 
-    combo_windows->blockSignals(true);
-
-    HWND hWindow = FindWindowW(L"QQSwordWinClass", nullptr);
-
-    while (hWindow != nullptr)
+    int found = 0;
+    int invalid = 0;
+    wchar_t processPath[512] = {};
+    HWND window = FindWindowW(L"QQSwordWinClass", nullptr);
+    while (window)
     {
-        wchar_t title[512] = {};
-        wchar_t className[256] = {};
-        GetWindowTextW(hWindow, title, 512);
-        GetClassNameW(hWindow, className, 256);
-
-        DWORD pid;
-        GetWindowThreadProcessId(hWindow, &pid);
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        DWORD processId = 0;
+        GetWindowThreadProcessId(window, &processId);
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
         DWORD pathLength = 512;
-        const bool gotProcessPath = hProcess &&
-            QueryFullProcessImageNameW(hProcess, 0, c_string, &pathLength) != FALSE;
-        if (hProcess)
-            CloseHandle(hProcess);
+        const bool gotPath = process &&
+            QueryFullProcessImageNameW(process, 0, processPath, &pathLength) != FALSE;
+        if (process)
+            CloseHandle(process);
 
-        const bool currentProcessMatch = gotProcessPath &&
-            QString::fromWCharArray(c_string, pathLength).endsWith(QStringLiteral("\\qqffo.exe"), Qt::CaseInsensitive);
-
-        if (currentProcessMatch)
+        const bool matches = gotPath && QString::fromWCharArray(processPath, pathLength)
+            .endsWith(QStringLiteral("\\qqffo.exe"), Qt::CaseInsensitive);
+        if (matches)
         {
-            QImage playerNameImage = getGamePicture(hWindow, playerNameRect);
-
-            if (!playerNameImage.isNull())
+            QImage image = getGamePicture(window, PlayerNameRect);
+            if (!image.isNull())
             {
+                gameWindows.push_back(window);
+                playerNameImages.push_back(image);
+                playerNameHashes.push_back(imageHash(image));
+                comboWindows->addItem(QIcon(QPixmap::fromImage(image)), QString());
                 ++found;
-                gameWindows.push_back(hWindow);
-                playerNameHashes.push_back(imageHash(playerNameImage));
-                playerNameImages.push_back(playerNameImage);
-                combo_windows->addItem(QIcon(QPixmap::fromImage(playerNameImage)), nullptr);
-
-                writeLog(QStringLiteral("扫描命中：handle=0x%1, pid=%2, class=%3, title=%4")
-                    .arg(reinterpret_cast<quintptr>(hWindow), 0, 16).arg(pid)
-                    .arg(QString::fromWCharArray(className), QString::fromWCharArray(title)));
             }
             else
             {
                 ++invalid;
-                writeLog(QStringLiteral("扫描排除不可截图窗口：handle=0x%1, pid=%2, minimized=%3, title=%4")
-                    .arg(reinterpret_cast<quintptr>(hWindow), 0, 16).arg(pid)
-                    .arg(IsIconic(hWindow) != FALSE).arg(QString::fromWCharArray(title)));
             }
         }
-
-        hWindow = FindWindowExW(nullptr, hWindow, L"QQSwordWinClass", nullptr);
+        window = FindWindowExW(nullptr, window, L"QQSwordWinClass", nullptr);
     }
+    comboWindows->blockSignals(false);
+    writeLog(QStringLiteral("扫描完成：找到%1个窗口，排除%2个不可截图窗口").arg(found).arg(invalid));
+}
 
-    combo_windows->blockSignals(false);
-    writeLog(QStringLiteral("扫描窗口完成：新版窗口类+进程方式，找到 %1 个窗口，%2 个窗口无法截图")
-        .arg(found).arg(invalid));
+void FxMainWindow::autoSelectAndRenameGameWindow(const QByteArray& hash)
+{
+    int selected = -1;
+    if (!hash.isEmpty())
+    {
+        for (int index = 0; index < playerNameHashes.size(); ++index)
+        {
+            if (playerNameHashes[index] == hash)
+            {
+                selected = index;
+                break;
+            }
+        }
+    }
+    if (selected < 0 && !gameWindows.isEmpty())
+        selected = 0;
+    comboWindows->setCurrentIndex(selected);
+    selectWindow(selected);
+    if (selected >= 0)
+        changeWindowTitle();
+}
+
+void FxMainWindow::selectWindow(int index)
+{
+    stopAutomation();
+    clearGameTopmost();
+    if (index < 0 || index >= gameWindows.size())
+    {
+        windowManager.setCurrentWindow(nullptr);
+        return;
+    }
+    windowManager.setCurrentWindow(gameWindows[index]);
+    currentHash = playerNameHashes[index];
+    if (btnGameTopmost->isChecked())
+        applyGameTopmost(true);
 }
 
 void FxMainWindow::changeWindowTitle()
 {
-    int window_index = combo_windows->currentIndex();
+    HWND window = windowManager.currentWindow();
+    if (window && !lineTitle->text().isEmpty())
+        SetWindowTextW(window, lineTitle->text().toStdWString().c_str());
+}
 
-    if (window_index == -1)
+void FxMainWindow::toggleAutomation()
+{
+    btnStartStop->setEnabled(false);
+    if (automation.isRunning())
     {
+        automation.stop();
+    }
+    else if (!windowManager.isCurrentWindowValid())
+    {
+        QMessageBox::warning(this, QStringLiteral("尚未选择游戏窗口"),
+            QStringLiteral("请先扫描并选择有效的游戏窗口。"));
+    }
+    else if (!automation.start())
+    {
+        QMessageBox::warning(this, QStringLiteral("启动失败"),
+            QStringLiteral("无法连接游戏输入线程，请检查游戏与本程序的权限。"));
+    }
+    btnStartStop->setText(automation.isRunning() ? QStringLiteral("停止") : QStringLiteral("开始"));
+    btnStartStop->setEnabled(true);
+}
+
+void FxMainWindow::stopAutomation()
+{
+    if (automation.isRunning())
+        automation.stop();
+    if (btnStartStop)
+        btnStartStop->setText(QStringLiteral("开始"));
+}
+
+void FxMainWindow::updateModeUI()
+{
+    const bool automatic = checkAutomaticMode->isChecked();
+    modeStack->setCurrentIndex(automatic ? 1 : 0);
+    labelAutomaticMode->setText(InputModeManager::displayName(modeManager.currentMode()));
+}
+
+void FxMainWindow::updatePinUI()
+{
+    btnGameTopmost->setIcon(pinIcon(btnGameTopmost->isChecked()));
+    btnGameTopmost->setIconSize(QSize(20, 20));
+}
+
+void FxMainWindow::applyGameTopmost(bool enabled)
+{
+    clearGameTopmost();
+    if (enabled)
+    {
+        HWND window = windowManager.currentWindow();
+        if (windowManager.setTopmost(window, true))
+            topmostWindow = window;
+    }
+    updatePinUI();
+}
+
+void FxMainWindow::clearGameTopmost()
+{
+    if (topmostWindow)
+        windowManager.setTopmost(topmostWindow, false);
+    topmostWindow = nullptr;
+}
+
+void FxMainWindow::showShortcutDialog()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("设置全局快捷键"));
+    QVBoxLayout* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(QStringLiteral("点击输入框后按下新的组合键：")));
+    QKeySequenceEdit* editor = new QKeySequenceEdit(hotkeyManager.shortcut());
+    layout->addWidget(editor);
+    QDialogButtonBox* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    if (dialog.exec() != QDialog::Accepted)
         return;
-    }
-
-    QString text = line_title->text();
-
-    if (!text.isEmpty())
-    {
-        SetWindowTextW(gameWindows[window_index], text.toStdWString().c_str());
-    }
+    QString error;
+    if (!hotkeyManager.setShortcut(editor->keySequence(), &error))
+        QMessageBox::warning(this, QStringLiteral("快捷键设置失败"), error);
 }
 
-bool FxMainWindow::tryPressKey(HWND window, int key_index, bool force)
-{
-    auto nowTimePoint = std::chrono::steady_clock::now();
-
-    std::chrono::milliseconds differFromSelf = std::chrono::duration_cast<std::chrono::milliseconds>(nowTimePoint - lastPressedTimePoint[key_index]);
-    std::chrono::milliseconds differFromAny = std::chrono::duration_cast<std::chrono::milliseconds>(nowTimePoint - lastAnyPressedTimePoint);
-    std::chrono::milliseconds selfInterval(static_cast<long long>(key_intervals[key_index]->value() * 1000));
-    std::chrono::milliseconds anyInterval(static_cast<long long>(spin_global_interval->value() * 1000));
-
-    if (force || (differFromSelf >= selfInterval && differFromAny >= anyInterval))
-    {
-        lastPressedTimePoint[key_index] = nowTimePoint;
-        lastAnyPressedTimePoint = nowTimePoint;
-
-        bool sent = pressKey(window, VK_F1 + key_index);
-        writeLog(QStringLiteral("触发 F%1：%2").arg(key_index + 1).arg(sent ? QStringLiteral("发送成功") : QStringLiteral("发送失败")));
-        return true;
-    }
-
-    return false;
-}
-
-bool FxMainWindow::pressKey(HWND window, UINT code)
-{
-    const bool autoForeground = check_always_on_top->isChecked();
-    if (!autoForeground && !isGameWindowFocused(window))
-    {
-        const int holdMilliseconds = randomizedKeyHoldMilliseconds();
-        const bool queued = sharedInputWorker->enqueueKey(code, holdMilliseconds);
-        writeLog(QStringLiteral("执行模式=共享消息：vk=0x%1, hold=%2ms, ok=%3")
-            .arg(code, 0, 16).arg(holdMilliseconds).arg(queued));
-        return queued;
-    }
-
-    const int method = autoForeground ? 4 : 0;
-    const QString effectiveMethodName = autoForeground
-        ? QStringLiteral("键盘+自动窗口")
-        : QStringLiteral("键盘+手动窗口");
-    if (autoForeground && !isGameWindowFocused(window))
-    {
-        // 恢复原“键盘+自动窗口”行为：仅在真正发送按键时激活游戏。
-        if (IsIconic(window))
-            ShowWindow(window, SW_RESTORE);
-        SetForegroundWindow(window);
-    }
-
-    const UINT scanCode = MapVirtualKeyW(code, MAPVK_VK_TO_VSC);
-    const bool foreground = GetForegroundWindow() == window;
-    DWORD errorCode = ERROR_SUCCESS;
-
-    const bool downOk = sendGlobalKey(false, code, method, &errorCode);
-    writeLog(QStringLiteral("按键按下：method=%1, vk=0x%2, scan=0x%3, window=0x%4, foreground=%5, ok=%6, error=%7")
-        .arg(effectiveMethodName)
-        .arg(code, 0, 16).arg(scanCode, 0, 16)
-        .arg(reinterpret_cast<quintptr>(window), 0, 16)
-        .arg(foreground).arg(downOk).arg(errorCode));
-
-    const int holdMilliseconds = randomizedKeyHoldMilliseconds();
-    const auto releaseKey = [this, code, method, effectiveMethodName]() {
-            DWORD upError = ERROR_SUCCESS;
-            const bool upOk = sendGlobalKey(true, code, method, &upError);
-            writeLog(QStringLiteral("按键释放：method=%1, vk=0x%2, ok=%3, error=%4")
-                .arg(effectiveMethodName)
-                .arg(code, 0, 16).arg(upOk).arg(upError));
-        };
-    if (holdMilliseconds < 1)
-        releaseKey();
-    else
-        QTimer::singleShot(holdMilliseconds, this, releaseKey);
-    return downOk;
-}
-
-bool FxMainWindow::isGameWindowFocused(HWND window) const
-{
-    const HWND foreground = GetForegroundWindow();
-    if (!foreground || GetAncestor(foreground, GA_ROOT) != window)
-        return false;
-
-    const DWORD gameThreadId = GetWindowThreadProcessId(window, nullptr);
-    GUITHREADINFO info = {};
-    info.cbSize = sizeof(info);
-    if (!GetGUIThreadInfo(gameThreadId, &info) || !info.hwndFocus)
-        return false;
-    return GetAncestor(info.hwndFocus, GA_ROOT) == window;
-}
-
-void FxMainWindow::clearGameAlwaysOnTop()
-{
-    if (alwaysOnTopWindow && IsWindow(alwaysOnTopWindow))
-    {
-        SetWindowPos(alwaysOnTopWindow, HWND_NOTOPMOST, 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    }
-    alwaysOnTopWindow = nullptr;
-}
-
-void FxMainWindow::updateGameAlwaysOnTop()
-{
-    const int index = combo_windows->currentIndex();
-    if (index < 0 || index >= gameWindows.size())
-        return;
-
-    HWND window = gameWindows[index];
-    if (!IsWindow(window))
-        return;
-
-    if (alwaysOnTopWindow != window)
-    {
-        clearGameAlwaysOnTop();
-        alwaysOnTopWindow = window;
-    }
-
-    // 这里只改变窗口层级，不抢焦点；焦点由按键发送时的自动窗口模式处理。
-    SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-}
-
-bool FxMainWindow::ensureGameWindowValid(HWND window)
-{
-    if (IsWindow(window))
-        return true;
-
-    writeLog(QStringLiteral("游戏窗口已失效：handle=0x%1，自动关闭全局开关")
-        .arg(reinterpret_cast<quintptr>(window), 0, 16));
-
-    // setChecked(false) 同步触发关闭逻辑；只有原本开启时才提示，
-    // 避免定时器或重复失败产生多个弹窗。
-    const bool wasEnabled = check_global_switch->isChecked();
-    if (wasEnabled)
-        check_global_switch->setChecked(false);
-
-    if (wasEnabled)
-    {
-        QMessageBox::warning(this,
-            QStringLiteral("游戏窗口已关闭"),
-            QStringLiteral("当前选择的游戏窗口已经不存在，全局开关已自动关闭。\n\n"
-                           "请点击“扫描游戏窗口”，重新扫描并选择窗口后再开启。"));
-    }
-    return false;
-}
-
-bool FxMainWindow::sendLegacyWindowKey(HWND window, UINT code, int method, DWORD* errorCode)
-{
-    HWND target = window;
-    SetLastError(ERROR_SUCCESS);
-    const UINT scanCode = MapVirtualKeyW(code, MAPVK_VK_TO_VSC);
-    const LPARAM downParam = static_cast<LPARAM>(1ULL | (static_cast<ULONGLONG>(scanCode) << 16));
-    const LPARAM upParam = static_cast<LPARAM>(static_cast<ULONGLONG>(downParam) |
-        (1ULL << 30) | (1ULL << 31));
-
-    // 实机验证无效，保留实现用于诊断：编号2，只发送带完整释放参数的WM_KEYUP。
-    if (method == 8)
-    {
-        const bool result = PostMessageA(target, WM_KEYUP, code, upParam) != FALSE;
-        if (!result)
-            *errorCode = GetLastError();
-        writeLog(QStringLiteral("KEYUP完整参数：target=0x%1, vk=0x%2, scan=0x%3, lParam=0x%4, ok=%5")
-            .arg(reinterpret_cast<quintptr>(target), 0, 16)
-            .arg(code, 0, 16).arg(scanCode, 0, 16)
-            .arg(static_cast<DWORD>(upParam), 0, 16).arg(result));
-        return result;
-    }
-
-    // 以下三种方式均已实机验证无效，保留实现用于诊断：
-    // 14=编号9；15=编号9但lParam为0；16=编号13（额外发送一次KEYUP）。
-    const bool useSystemMessage = method != 16 && code == VK_F10;
-    const UINT downMessage = useSystemMessage ? WM_SYSKEYDOWN : WM_KEYDOWN;
-    const UINT upMessage = useSystemMessage ? WM_SYSKEYUP : WM_KEYUP;
-    const LPARAM selectedDownParam = method == 15 ? 0 : downParam;
-    const LPARAM selectedUpParam = method == 15 ? 0 : upParam;
-
-    const bool downOk = PostMessageA(target, downMessage, code, selectedDownParam) != FALSE;
-    if (!downOk)
-        *errorCode = GetLastError();
-
-    const int holdMilliseconds = randomizedKeyHoldMilliseconds();
-    const auto releaseKey = [this, target, upMessage, code, selectedUpParam, method]() {
-            SetLastError(ERROR_SUCCESS);
-            const bool firstUpOk = PostMessageA(target, upMessage, code, selectedUpParam) != FALSE;
-            const bool secondUpOk = method != 16 ||
-                PostMessageA(target, WM_KEYUP, code, selectedUpParam) != FALSE;
-            const DWORD upError = firstUpOk && secondUpOk ? ERROR_SUCCESS : GetLastError();
-            writeLog(QStringLiteral("消息释放：target=0x%1, msg=0x%2, vk=0x%3, lParam=0x%4, upCount=%5, ok=%6, error=%7")
-                .arg(reinterpret_cast<quintptr>(target), 0, 16)
-                .arg(upMessage, 0, 16).arg(code, 0, 16)
-                .arg(static_cast<DWORD>(selectedUpParam), 0, 16)
-                .arg(method == 16 ? 2 : 1).arg(firstUpOk && secondUpOk).arg(upError));
-        };
-    if (holdMilliseconds < 1)
-        releaseKey();
-    else
-        QTimer::singleShot(holdMilliseconds, this, releaseKey);
-
-    writeLog(QStringLiteral("组合消息：method=%1, target=0x%2, down=0x%3, up=0x%4, vk=0x%5, scan=0x%6, hold=%7ms, downLParam=0x%8, upLParam=0x%9")
-        .arg(method).arg(reinterpret_cast<quintptr>(target), 0, 16)
-        .arg(downMessage, 0, 16).arg(upMessage, 0, 16)
-        .arg(code, 0, 16).arg(scanCode, 0, 16).arg(holdMilliseconds)
-        .arg(static_cast<DWORD>(selectedDownParam), 0, 16)
-        .arg(static_cast<DWORD>(selectedUpParam), 0, 16));
-    return downOk;
-}
-
-int FxMainWindow::randomizedKeyHoldMilliseconds() const
-{
-    const int configuredMilliseconds = qRound(spin_key_hold_interval->value() * 1000.0);
-    static std::mt19937 generator(static_cast<unsigned int>(GetTickCount() ^ GetCurrentProcessId()));
-    static std::uniform_int_distribution<int> jitter(-2, 2);
-    const int randomizedMilliseconds = configuredMilliseconds + jitter(generator);
-    return randomizedMilliseconds < 1 ? 0 : randomizedMilliseconds;
-}
-
-bool FxMainWindow::sendGlobalKey(bool keyUp, UINT code, int method, DWORD* errorCode)
-{
-    SetLastError(ERROR_SUCCESS);
-    bool result = false;
-    switch (method)
-    {
-    case 0: case 4:
-    {
-        INPUT input = {};
-        input.type = INPUT_KEYBOARD;
-        input.ki.wVk = static_cast<WORD>(code);
-        input.ki.dwFlags = keyUp ? KEYEVENTF_KEYUP : 0;
-        result = SendInput(1, &input, sizeof(input)) == 1;
-        break;
-    }
-#if 0
-    // 其他下拉选项对应的实现暂不编译，需要恢复选项时可重新启用。
-    case 1: case 5:
-    {
-        INPUT input = {};
-        input.type = INPUT_KEYBOARD;
-        input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(code, MAPVK_VK_TO_VSC));
-        input.ki.dwFlags = KEYEVENTF_SCANCODE | (keyUp ? KEYEVENTF_KEYUP : 0);
-        result = SendInput(1, &input, sizeof(input)) == 1;
-        break;
-    }
-    case 2: case 3: case 6: case 7:
-    {
-        const bool scanOnly = method == 3 || method == 7;
-        const BYTE scanCode = static_cast<BYTE>(MapVirtualKeyW(static_cast<UINT>(code), MAPVK_VK_TO_VSC));
-        const DWORD flags = keyUp ? KEYEVENTF_KEYUP : 0;
-        keybd_event(scanOnly ? 0 : static_cast<BYTE>(code), scanCode, flags, 0);
-        result = true;
-        break;
-    }
-#endif
-    default:
-        *errorCode = ERROR_INVALID_PARAMETER;
-        return false;
-    }
-
-    if (!result)
-        *errorCode = GetLastError();
-    return result;
-}
-
-QString FxMainWindow::currentSendMethodName() const
-{
-    return QStringLiteral("混合按键模式");
-}
-
-void FxMainWindow::writeLog(const QString& message)
+void FxMainWindow::writeLog(const QString& message, bool failed)
 {
     if (!logTextEdit)
         return;
-
-    logTextEdit->moveCursor(QTextCursor::End);
-    logTextEdit->insertPlainText(QStringLiteral("%1  %2\n")
-        .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz")), message));
+    QTextCharFormat format;
+    format.setForeground(failed ? QColor(Qt::red) : logTextEdit->palette().text().color());
+    QTextCursor cursor = logTextEdit->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(QStringLiteral("%1  %2\n")
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz")), message), format);
+    logTextEdit->setTextCursor(cursor);
     logTextEdit->ensureCursorVisible();
 }
 
@@ -522,542 +480,191 @@ void FxMainWindow::showLogWindow()
         logTextEdit->window()->activateWindow();
         return;
     }
-
-    auto dialog = new QDialog(this);
+    QDialog* dialog = new QDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(QStringLiteral("FxPresser 调试日志"));
-    dialog->resize(900, 520);
-
-    auto layout = new QVBoxLayout(dialog);
-    auto text = new QTextEdit(dialog);
+    dialog->resize(760, 480);
+    QVBoxLayout* layout = new QVBoxLayout(dialog);
+    QTextEdit* text = new QTextEdit(dialog);
     text->setReadOnly(true);
     logTextEdit = text;
-    layout->addWidget(text, 1);
+    layout->addWidget(text);
     dialog->show();
-    writeLog(QStringLiteral("调试窗口已打开；仅显示打开期间的日志，关闭后立即销毁。"));
-    writeLog(QStringLiteral("当前设置：按键方式=%1，全局间隔=%2s，释放间隔=%3s")
-        .arg(currentSendMethodName())
-        .arg(spin_global_interval->value(), 0, 'f', 2)
-        .arg(spin_key_hold_interval->value(), 0, 'f', 3));
+    writeLog(QStringLiteral("调试窗口已打开；日志仅保存在此窗口中。"));
+}
 
-    const int windowIndex = combo_windows->currentIndex();
-    if (windowIndex >= 0 && windowIndex < gameWindows.size())
-    {
-        writeLog(QStringLiteral("当前窗口：handle=0x%1")
-            .arg(reinterpret_cast<quintptr>(gameWindows[windowIndex]), 0, 16));
-    }
-    else
-    {
-        writeLog(QStringLiteral("当前窗口：未选择"));
-    }
-
-    for (int index = 0; index < 10; ++index)
-    {
-        if (key_checks[index]->isChecked())
-        {
-            writeLog(QStringLiteral("启用 F%1：间隔=%2s，缺省=%3")
-                .arg(index + 1)
-                .arg(key_intervals[index]->value(), 0, 'f', 1)
-                .arg(index == currentDefaultKey ? QStringLiteral("是") : QStringLiteral("否")));
-        }
-    }
+QIcon FxMainWindow::pinIcon(bool active)
+{
+    QPixmap pixmap(24, 24);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QColor color = active ? QColor(218, 165, 32) : QColor(110, 110, 110);
+    painter.setPen(QPen(color.darker(130), 1.5));
+    painter.setBrush(color);
+    painter.drawRoundedRect(QRectF(7, 3, 10, 7), 2, 2);
+    QPolygonF point;
+    point << QPointF(9, 9) << QPointF(15, 9) << QPointF(13, 15)
+          << QPointF(12, 21) << QPointF(11, 15);
+    painter.drawPolygon(point);
+    return QIcon(pixmap);
 }
 
 QImage FxMainWindow::getGamePicture(HWND window, QRect rect)
 {
-    std::vector<uchar> pixelBuffer;
-    QImage result;
-
-    BITMAPINFO b;
-
-    if ((IsWindow(window) == FALSE) || (IsIconic(window) == TRUE))
+    if (!window || IsWindow(window) == FALSE || IsIconic(window))
         return QImage();
 
-    b.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    b.bmiHeader.biWidth = rect.width();
-    b.bmiHeader.biHeight = rect.height();
-    b.bmiHeader.biPlanes = 1;
-    b.bmiHeader.biBitCount = 3 * 8;
-    b.bmiHeader.biCompression = BI_RGB;
-    b.bmiHeader.biSizeImage = 0;
-    b.bmiHeader.biXPelsPerMeter = 0;
-    b.bmiHeader.biYPelsPerMeter = 0;
-    b.bmiHeader.biClrUsed = 0;
-    b.bmiHeader.biClrImportant = 0;
-    b.bmiColors[0].rgbBlue = 8;
-    b.bmiColors[0].rgbGreen = 8;
-    b.bmiColors[0].rgbRed = 8;
-    b.bmiColors[0].rgbReserved = 0;
+    BITMAPINFO bitmapInfo = {};
+    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth = rect.width();
+    bitmapInfo.bmiHeader.biHeight = rect.height();
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 24;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-    HDC dc = GetDC(window);
-    HDC cdc = CreateCompatibleDC(dc);
+    HDC windowDc = GetDC(window);
+    HDC memoryDc = CreateCompatibleDC(windowDc);
+    HBITMAP bitmap = CreateCompatibleBitmap(windowDc, rect.width(), rect.height());
+    HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
+    BitBlt(memoryDc, 0, 0, rect.width(), rect.height(), windowDc,
+        rect.left(), rect.top(), SRCCOPY);
 
-    HBITMAP hBitmap = CreateCompatibleBitmap(dc, rect.width(), rect.height());
-    SelectObject(cdc, hBitmap);
+    const int stride = (rect.width() * 3 + 3) & ~3;
+    QByteArray pixels(stride * rect.height(), 0);
+    GetDIBits(memoryDc, bitmap, 0, rect.height(), pixels.data(), &bitmapInfo, DIB_RGB_COLORS);
+    SelectObject(memoryDc, oldBitmap);
+    DeleteObject(bitmap);
+    DeleteDC(memoryDc);
+    ReleaseDC(window, windowDc);
 
-    BitBlt(cdc, 0, 0, rect.width(), rect.height(), dc, rect.left(), rect.top(), SRCCOPY);
-    pixelBuffer.resize(rect.width() * rect.height() * 4);
-    GetDIBits(cdc, hBitmap, 0, rect.height(), pixelBuffer.data(), &b, DIB_RGB_COLORS);
-    DeleteObject(hBitmap);
-
-    DeleteDC(cdc);
-    ReleaseDC(window, dc);
-
-    return QImage(pixelBuffer.data(), rect.width(), rect.height(), (rect.width() * 3 + 3) & (~3), QImage::Format_RGB888).rgbSwapped().mirrored();
+    return QImage(reinterpret_cast<const uchar*>(pixels.constData()), rect.width(),
+        rect.height(), stride, QImage::Format_RGB888).rgbSwapped().mirrored().copy();
 }
 
-QString FxMainWindow::getConfigPath()
+QByteArray FxMainWindow::imageHash(QImage image)
 {
-    //exe目录/config/exe文件名.json
-    auto dirp = QCoreApplication::applicationDirPath();
-    auto exep = QCoreApplication::applicationFilePath();
-
-    return (dirp + "/config/%1.json").arg(exep.mid(dirp.length() + 1, exep.length() - dirp.length() - 5));
+    if (image.isNull())
+        return QByteArray();
+    QByteArray bytes;
+    QDataStream stream(&bytes, QIODevice::WriteOnly);
+    stream << image;
+    return QCryptographicHash::hash(bytes, QCryptographicHash::Md5).toBase64();
 }
 
-SConfigData FxMainWindow::readConfig(const QString& filename)
+QString FxMainWindow::getConfigPath() const
 {
-    QFile file;
-    QJsonDocument doc;
-    QJsonObject root;
+    const QString directory = QCoreApplication::applicationDirPath();
+    const QString executable = QFileInfo(QCoreApplication::applicationFilePath()).completeBaseName();
+    return directory + QStringLiteral("/config/") + executable + QStringLiteral(".json");
+}
 
-    file.setFileName(filename);
-    if (!file.open(QIODevice::Text | QIODevice::ReadOnly))
-    {
+SConfigData FxMainWindow::readConfig(const QString& filename) const
+{
+    QFile file(filename);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
         return SConfigData();
-    }
-
-    doc = QJsonDocument::fromJson(file.readAll());
-    if (doc.isNull())
-    {
-        return SConfigData();
-    }
-
-    return jsonToConfig(doc.object());
+    const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+    return document.isObject() ? jsonToConfig(document.object()) : SConfigData();
 }
 
-void FxMainWindow::writeConfig(const QString& filename, const SConfigData& config)
+void FxMainWindow::writeConfig(const QString& filename, const SConfigData& config) const
 {
-    QFile file;
-    QJsonObject root;
-    QJsonDocument doc;
-
-    file.setFileName(filename);
-    if (!file.open(QIODevice::Text | QIODevice::WriteOnly | QIODevice::Truncate))
-    {
-        return;
-    }
-
-    root = configToJson(config);
-    doc.setObject(root);
-    file.write(doc.toJson(QJsonDocument::Indented));
+    QFile file(filename);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+        file.write(QJsonDocument(configToJson(config)).toJson(QJsonDocument::Indented));
 }
 
-void FxMainWindow::loadConfig()
+SConfigData FxMainWindow::makeConfigFromUI() const
 {
-    applyConfigToUI(readConfig(getConfigPath()));
-}
-
-void FxMainWindow::autoWriteConfig()
-{
-    writeConfig(getConfigPath(), makeConfigFromUI());
-}
-
-SConfigData FxMainWindow::makeConfigFromUI()
-{
-    SConfigData result;
-
+    SConfigData config;
     for (int index = 0; index < 10; ++index)
     {
-        result.fxSwitch[index] = key_checks[index]->isChecked();
-        result.fxCD[index] = key_intervals[index]->value();
+        config.keyEnabled[index] = keyChecks[index]->isChecked();
+        config.keyIntervals[index] = keyIntervals[index]->value();
     }
-
-    result.globalInterval = spin_global_interval->value();
-    result.defaultKey = currentDefaultKey;
-    result.keyHoldInterval = spin_key_hold_interval->value();
-    result.alwaysOnTop = check_always_on_top->isChecked();
-
-    result.hash = currentHash;
-    result.title = line_title->text();
-
-    auto rect = geometry();
-
-    result.x = rect.x();
-    result.y = rect.y();
-
-    return result;
+    config.globalInterval = spinGlobalInterval->value();
+    config.releaseInterval = spinReleaseInterval->value();
+    config.gameTopmost = btnGameTopmost->isChecked();
+    config.automaticMode = checkAutomaticMode->isChecked();
+    config.manualMode = static_cast<InputMode>(comboInputMode->currentData().toInt());
+    config.globalShortcut = hotkeyManager.shortcut();
+    config.title = lineTitle->text();
+    config.hash = currentHash;
+    config.x = geometry().x();
+    config.y = geometry().y();
+    return config;
 }
 
 void FxMainWindow::applyConfigToUI(const SConfigData& config)
 {
     for (int index = 0; index < 10; ++index)
     {
-        key_checks[index]->setChecked(config.fxSwitch[index]);
-        key_intervals[index]->setValue(config.fxCD[index]);
+        keyChecks[index]->setChecked(config.keyEnabled[index]);
+        keyIntervals[index]->setValue(config.keyIntervals[index]);
     }
-
-    spin_global_interval->setValue(config.globalInterval);
-    spin_key_hold_interval->setValue(config.keyHoldInterval);
-    check_always_on_top->setChecked(config.alwaysOnTop);
-
-    currentDefaultKey = config.defaultKey;
-    for (int index = 0; index < 10; ++index)
-    {
-        key_defaults[index]->setChecked(index == config.defaultKey);
-    }
-
+    spinGlobalInterval->setValue(config.globalInterval);
+    spinReleaseInterval->setValue(config.releaseInterval);
+    const int modeIndex = comboInputMode->findData(static_cast<int>(config.manualMode));
+    comboInputMode->setCurrentIndex(modeIndex < 0 ? 0 : modeIndex);
+    checkAutomaticMode->setChecked(config.automaticMode);
+    btnGameTopmost->setChecked(config.gameTopmost);
+    lineTitle->setText(config.title);
     currentHash = config.hash;
-    line_title->setText(config.title);
-
-    auto rect = geometry();
-
-    if (config.x != -1 && config.y != -1)
-    {
-        setGeometry(config.x, config.y, rect.width(), rect.height());
-    }
-}
-
-void FxMainWindow::applyDefaultConfigToUI()
-{
-    applyConfigToUI(SConfigData());
+    if (config.x >= 0 && config.y >= 0)
+        move(config.x, config.y);
+    updatePinUI();
 }
 
 QJsonObject FxMainWindow::configToJson(const SConfigData& config)
 {
     QJsonObject result;
-    QJsonArray pressArray;
-    QJsonObject supplyObject;
-
-    for (int index = 0; index < 10; index++)
+    QJsonArray keys;
+    for (int index = 0; index < 10; ++index)
     {
-        QJsonObject keyObject;
-        keyObject[QStringLiteral("Enabled")] = config.fxSwitch[index];
-        keyObject[QStringLiteral("Interval")] = config.fxCD[index];
-        pressArray.append(keyObject);
+        QJsonObject key;
+        key[QStringLiteral("Enabled")] = config.keyEnabled[index];
+        key[QStringLiteral("Interval")] = config.keyIntervals[index];
+        keys.append(key);
     }
-    result[QStringLiteral("AutoPress")] = pressArray;
-
-    result["Interval"] = config.globalInterval;
-    result["DefaultKey"] = config.defaultKey;
-    result["KeyHoldInterval"] = config.keyHoldInterval;
-    result["AlwaysOnTop"] = config.alwaysOnTop;
-
-    result["X"] = config.x;
-    result["Y"] = config.y;
-
-    result["Title"] = config.title;
-    result["Hash"] = QString::fromUtf8(config.hash);
-
+    result[QStringLiteral("AutoPress")] = keys;
+    result[QStringLiteral("Interval")] = config.globalInterval;
+    result[QStringLiteral("KeyHoldInterval")] = config.releaseInterval;
+    result[QStringLiteral("AlwaysOnTop")] = config.gameTopmost;
+    result[QStringLiteral("AutomaticMode")] = config.automaticMode;
+    result[QStringLiteral("ManualMode")] = static_cast<int>(config.manualMode);
+    result[QStringLiteral("GlobalShortcut")] = config.globalShortcut.toString(QKeySequence::PortableText);
+    result[QStringLiteral("Title")] = config.title;
+    result[QStringLiteral("Hash")] = QString::fromUtf8(config.hash);
+    result[QStringLiteral("X")] = config.x;
+    result[QStringLiteral("Y")] = config.y;
     return result;
 }
 
 SConfigData FxMainWindow::jsonToConfig(QJsonObject json)
 {
     SConfigData result;
-    QJsonArray pressArray;
-    QJsonObject supplyObject;
-
-    pressArray = json.take(QStringLiteral("AutoPress")).toArray();
-
-    if (pressArray.size() == 10)
+    const QJsonArray keys = json.value(QStringLiteral("AutoPress")).toArray();
+    if (keys.size() == 10)
     {
-        for (int index = 0; index < 10; index++)
+        for (int index = 0; index < 10; ++index)
         {
-            QJsonObject keyObject = pressArray[index].toObject();
-            result.fxSwitch[index] = keyObject.take(QStringLiteral("Enabled")).toBool(false);
-            result.fxCD[index] = keyObject.take(QStringLiteral("Interval")).toDouble(1.0);
+            const QJsonObject key = keys[index].toObject();
+            result.keyEnabled[index] = key.value(QStringLiteral("Enabled")).toBool(false);
+            result.keyIntervals[index] = key.value(QStringLiteral("Interval")).toDouble(1.0);
         }
     }
-
-    result.globalInterval = json.take("Interval").toDouble(0.1);
-    result.defaultKey = json.take("DefaultKey").toInt(-1);
-    result.keyHoldInterval = json.take("KeyHoldInterval").toDouble(0.027);
-    result.alwaysOnTop = json.take("AlwaysOnTop").toBool(false);
-
-    result.x = json.take("X").toInt(-1);
-    result.y = json.take("Y").toInt(-1);
-
-    result.title = json.take("Title").toString("");
-    result.hash = json.take("Hash").toString("").toUtf8();
-
+    result.globalInterval = json.value(QStringLiteral("Interval")).toDouble(0.1);
+    result.releaseInterval = json.value(QStringLiteral("KeyHoldInterval")).toDouble(0.027);
+    result.gameTopmost = json.value(QStringLiteral("AlwaysOnTop")).toBool(false);
+    result.automaticMode = json.value(QStringLiteral("AutomaticMode")).toBool(true);
+    result.manualMode = static_cast<InputMode>(json.value(QStringLiteral("ManualMode")).toInt(0));
+    result.globalShortcut = QKeySequence(json.value(QStringLiteral("GlobalShortcut"))
+        .toString(QStringLiteral("Ctrl+Alt+F12")), QKeySequence::PortableText);
+    result.title = json.value(QStringLiteral("Title")).toString();
+    result.hash = json.value(QStringLiteral("Hash")).toString().toUtf8();
+    result.x = json.value(QStringLiteral("X")).toInt(-1);
+    result.y = json.value(QStringLiteral("Y")).toInt(-1);
+    // 旧配置中的DefaultKey和SendMethod字段按确认方案直接忽略。
     return result;
-}
-
-QByteArray FxMainWindow::imageHash(QImage image)
-{
-    if (image.isNull() || image.format() != QImage::Format_RGB888)
-        return QByteArray();
-
-    QByteArray imageBytes;
-    QDataStream stream(&imageBytes, QIODevice::WriteOnly);
-
-    stream << image;
-
-    return QCryptographicHash::hash(imageBytes, QCryptographicHash::Md5).toBase64();
-}
-
-void FxMainWindow::setupUI()
-{
-    auto get_h_line = []() {
-        auto line = new QFrame;
-
-        line->setFrameShape(QFrame::HLine);
-        line->setFrameShadow(QFrame::Sunken);
-        line->setLineWidth(1);
-
-        return line;
-    };
-
-    auto makeHelpButton = [this](const QString& title, const QString& description) {
-        auto button = new QToolButton;
-        button->setText(QStringLiteral("?"));
-        button->setFixedSize(18, 18);
-        button->setToolTip(QStringLiteral("点击查看计算逻辑"));
-        connect(button, &QToolButton::clicked, this, [this, title, description]() {
-            QMessageBox::information(this, title, description);
-        });
-        return button;
-    };
-
-    QFont switch_font;
-    switch_font.setFamily(QStringLiteral("微软雅黑"));
-    switch_font.setPointSize(20);
-    switch_font.setBold(true);
-
-    QStringList supply_keys;
-
-    for (int index = 0; index < 10; ++index)
-    {
-        supply_keys << QString("F%1").arg(index + 1);
-    }
-
-    auto main_widget = new QWidget;
-    auto vlayout_main = new QVBoxLayout;
-
-    btn_scan = new QPushButton(QStringLiteral("扫描游戏窗口"));
-    connect(btn_scan, &QPushButton::clicked, [this]()
-        {
-            scanGameWindows();
-
-            if (!gameWindows.isEmpty())
-                autoSelectAndRenameGameWindow(currentHash);
-        });
-    vlayout_main->addWidget(btn_scan);
-
-    combo_windows = new QComboBox;
-    combo_windows->setIconSize(playerNameRect.size());
-    combo_windows->setItemDelegate(new CharacterBoxDelegate);
-    connect(combo_windows, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged), [this](int index)
-        {
-            check_global_switch->setChecked(false);
-
-            clearGameAlwaysOnTop();
-
-            if (index != -1)
-            {
-                currentHash = playerNameHashes[index];
-                if (check_always_on_top->isChecked())
-                    updateGameAlwaysOnTop();
-            }
-        });
-    vlayout_main->addWidget(combo_windows);
-
-    line_title = new QLineEdit;
-    auto hlayout_title = new QHBoxLayout;
-    hlayout_title->addWidget(new QLabel(QStringLiteral("窗口标题")));
-    hlayout_title->addWidget(line_title, 1);
-    vlayout_main->addLayout(hlayout_title);
-
-    btn_change_title = new QPushButton(QStringLiteral("修改窗口标题"));
-    connect(btn_change_title, &QPushButton::clicked, this, &FxMainWindow::changeWindowTitle);
-    vlayout_main->addWidget(btn_change_title);
-
-    btn_switch_to_window = new QPushButton(QStringLiteral("切换到游戏窗口"));
-    connect(btn_switch_to_window, &QPushButton::clicked, [this]()
-        {
-            int window_index = combo_windows->currentIndex();
-
-            if (window_index == -1)
-            {
-                return;
-            }
-
-            SetForegroundWindow(gameWindows[window_index]);
-        });
-    vlayout_main->addWidget(btn_switch_to_window);
-
-    check_always_on_top = new QCheckBox(QStringLiteral("总在最前"));
-    connect(check_always_on_top, &QCheckBox::toggled, this, [this](bool checked) {
-        if (checked)
-            updateGameAlwaysOnTop();
-        else
-            clearGameAlwaysOnTop();
-        writeLog(QStringLiteral("游戏总在最前：%1").arg(checked));
-    });
-    vlayout_main->addWidget(check_always_on_top);
-
-    spin_key_hold_interval = new QDoubleSpinBox;
-    spin_key_hold_interval->setSuffix(QStringLiteral(" s"));
-    spin_key_hold_interval->setDecimals(3);
-    spin_key_hold_interval->setMinimum(-5.0);
-    spin_key_hold_interval->setMaximum(5.0);
-    spin_key_hold_interval->setSingleStep(0.001);
-    spin_key_hold_interval->setValue(0.027);
-    auto hlayout_key_hold = new QHBoxLayout;
-    hlayout_key_hold->addWidget(new QLabel(QStringLiteral("释放间隔")));
-    hlayout_key_hold->addWidget(makeHelpButton(
-        QStringLiteral("释放间隔计算逻辑"),
-        QStringLiteral("键盘方式会先发送按下，再等待该时间，最后发送释放。\n\n"
-                       "计算：实际释放间隔 = 当前设置值 + 随机抖动（-2ms至+2ms）。\n\n"
-                       "随机结果小于1ms时立即释放，不启用延迟；否则至少延迟1ms。\n\n"
-                       "所有包含DOWN/UP的可用模式都使用该设置；默认27ms，实际为25–29ms。")));
-    hlayout_key_hold->addWidget(spin_key_hold_interval);
-    hlayout_key_hold->addStretch();
-    vlayout_main->addLayout(hlayout_key_hold);
-
-    vlayout_main->addWidget(get_h_line());
-
-    check_global_switch = new QCheckBox(QStringLiteral("全局开关"));
-    check_global_switch->setFont(switch_font);
-    connect(check_global_switch, &QCheckBox::toggled, [this](bool checked)
-        {
-            if (checked)
-            {
-                const int windowIndex = combo_windows->currentIndex();
-                if (windowIndex == -1)
-                {
-                    check_global_switch->setChecked(false);
-                    QMessageBox::warning(this,
-                        QStringLiteral("尚未选择游戏窗口"),
-                        QStringLiteral("请先点击“扫描游戏窗口”并选择窗口，然后再开启全局开关。"));
-                    return;
-                }
-
-                // 仅在开启全局开关时检查一次，定时发送路径不重复调用 IsWindow()。
-                if (!ensureGameWindowValid(gameWindows[windowIndex]))
-                    return;
-
-                if (!sharedInputWorker->startForWindow(gameWindows[windowIndex]))
-                {
-                    check_global_switch->setChecked(false);
-                    QMessageBox::warning(this,
-                        QStringLiteral("共享输入启动失败"),
-                        QStringLiteral("无法将独立输入线程连接到游戏窗口，请重新扫描窗口或检查权限。"));
-                    return;
-                }
-
-                defaultKeyTriggered = false;
-                resetAllTimeStamps();
-
-                writeLog(QStringLiteral("全局开关已开启：handle=0x%1, method=%2")
-                    .arg(reinterpret_cast<quintptr>(gameWindows[windowIndex]), 0, 16)
-                    .arg(currentSendMethodName()));
-            }
-            else
-            {
-                sharedInputWorker->stopForWindow();
-                writeLog(QStringLiteral("全局开关已关闭"));
-            }
-        });
-    auto hlayout_switch = new QHBoxLayout;
-    hlayout_switch->addStretch();
-    hlayout_switch->addWidget(check_global_switch);
-    hlayout_switch->addStretch();
-    vlayout_main->addLayout(hlayout_switch);
-
-    spin_global_interval = new QDoubleSpinBox;
-    spin_global_interval->setSuffix(" s");
-    spin_global_interval->setDecimals(2);
-    spin_global_interval->setMinimum(0.1);
-    spin_global_interval->setMaximum(365.0);
-    spin_global_interval->setSingleStep(0.01);
-    spin_global_interval->setValue(0.1);
-    auto hlayout_press_interval = new QHBoxLayout;
-    hlayout_press_interval->addStretch();
-    hlayout_press_interval->addWidget(new QLabel(QStringLiteral("全局间隔")));
-    hlayout_press_interval->addWidget(makeHelpButton(
-        QStringLiteral("全局间隔计算逻辑"),
-        QStringLiteral("表示任意两个按键触发之间的最短等待时间。\n\n"
-                       "允许下一个按键的时间 = 上一个任意按键的触发时间 + 全局间隔。\n\n"
-                       "如果多个按键同时到期，每次只触发一个；等待全局间隔后，再按公平轮询顺序选择下一个。")));
-    hlayout_press_interval->addWidget(spin_global_interval);
-    hlayout_press_interval->addStretch();
-    vlayout_main->addLayout(hlayout_press_interval);
-    vlayout_main->addWidget(get_h_line());
-
-    auto gridlayout_keys = new QGridLayout;
-    gridlayout_keys->addWidget(new QLabel(QStringLiteral("启用")), 0, 0);
-    auto keyIntervalHeader = new QWidget;
-    auto keyIntervalHeaderLayout = new QHBoxLayout(keyIntervalHeader);
-    keyIntervalHeaderLayout->setContentsMargins(0, 0, 0, 0);
-    keyIntervalHeaderLayout->setSpacing(2);
-    keyIntervalHeaderLayout->addWidget(new QLabel(QStringLiteral("间隔")));
-    keyIntervalHeaderLayout->addWidget(makeHelpButton(
-        QStringLiteral("单键间隔计算逻辑"),
-        QStringLiteral("表示同一个按键两次触发之间的最短时间。\n\n"
-                       "按键可触发条件：单键间隔已到，并且全局间隔也已到。\n\n"
-                       "启用多个按键时还需要排队，所以实际周期可能大于这里设置的时间。缺省技能只在开启全局开关时触发一次。")));
-    gridlayout_keys->addWidget(keyIntervalHeader, 0, 1);
-    gridlayout_keys->addWidget(new QLabel(QStringLiteral("缺省")), 0, 2);
-
-    for (int index = 0; index < 10; ++index)
-    {
-        auto check_key = new QCheckBox(QString("F%1").arg(index + 1));
-        auto spin_key_interval = new QDoubleSpinBox;
-        auto check_default = new QCheckBox;
-
-        spin_key_interval->setSuffix(" s");
-        spin_key_interval->setDecimals(1);
-        spin_key_interval->setMinimum(0.1);
-        spin_key_interval->setMaximum(365.0);
-        spin_key_interval->setSingleStep(0.1);
-        spin_key_interval->setValue(1.0);
-        key_checks[index] = check_key;
-        key_intervals[index] = spin_key_interval;
-        key_defaults[index] = check_default;
-
-        connect(check_key, &QCheckBox::toggled,
-            [this, index](bool checked) {
-                key_intervals[index]->setEnabled(!checked);
-                resetTimeStamp(index);
-            });
-
-        connect(check_default, &QCheckBox::toggled,
-            [this, index](bool checked) {
-                //模拟QButtonGroup互斥，并能够全部取消选择
-                if (checked)
-                {
-                    currentDefaultKey = index;
-
-                    for (int key_index = 0; key_index < 10; ++key_index)
-                    {
-                        if (key_index != index)
-                            key_defaults[key_index]->setChecked(false);
-                    }
-                }
-                else
-                {
-                    currentDefaultKey = -1;
-                }
-            });
-
-        gridlayout_keys->addWidget(check_key, index + 1, 0);
-        gridlayout_keys->addWidget(spin_key_interval, index + 1, 1);
-        gridlayout_keys->addWidget(check_default, index + 1, 2);
-    }
-
-    vlayout_main->addLayout(gridlayout_keys);
-
-    btn_show_log = new QPushButton(QStringLiteral("查看调试日志"));
-    connect(btn_show_log, &QPushButton::clicked, this, &FxMainWindow::showLogWindow);
-    vlayout_main->addWidget(btn_show_log);
-
-    main_widget->setLayout(vlayout_main);
-    this->setCentralWidget(main_widget);
-    // 高度固定；宽度默认及最大为 200px，并允许用户向更窄方向手动调节。
-    this->setMinimumWidth(160);
-    this->setMaximumWidth(200);
-    this->setFixedHeight(minimumSizeHint().height());
-    this->resize(200, height());
 }

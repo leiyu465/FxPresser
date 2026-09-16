@@ -6,7 +6,18 @@ project(fxpresser)
 
 find_package(Qt5 COMPONENTS Core Gui Widgets REQUIRED)
 
-add_executable(fxpresser WIN32 fxmainwindow.cpp sharedinputworker.cpp main.cpp icon.rc)
+add_executable(fxpresser WIN32
+    main.cpp
+    fxmainwindow.cpp
+    runtimeconfig.cpp
+    gamewindowmanager.cpp
+    inputmodemanager.cpp
+    sharedinputworker.cpp
+    keyexecutor.cpp
+    keyscheduler.cpp
+    automationcontroller.cpp
+    globalhotkeymanager.cpp
+    icon.rc)
 
 # 发布版本不携带调试符号，减小体积并避免非标准发布特征触发启发式误报。
 set_target_properties(fxpresser PROPERTIES LINK_FLAGS_RELEASE "-s")

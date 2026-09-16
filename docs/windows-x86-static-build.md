@@ -47,16 +47,16 @@ JOBS=8 BUILD_ROOT=/tmp/fxpresser-static-build \
 ## 输出文件
 
 ```text
-dist/windows-x86-static/FxPresser-v2.0-YYYYMMDD.exe
-dist/FxPresser-v2.0-YYYYMMDD-windows-x86-static.zip
+dist/windows-x86-static/FxPresser-v3.0-YYYYMMDD.exe
+dist/FxPresser-v3.0-YYYYMMDD-windows-x86-static.zip
 ```
 
 ZIP 中只有一个 EXE。配置文件仍由程序在首次运行时自行创建。
 
-版本号来自仓库根目录的 `VERSION` 文件，格式固定为 `2.x`。每次更新定版时递增第二位，例如 `2.0`、`2.1`、`2.2`；日期由构建脚本按UTC自动生成。临时构建可以覆盖：
+版本号来自仓库根目录的 `VERSION` 文件，使用两段数字格式。重构版从 `3.0` 开始；日期由构建脚本按UTC自动生成。临时构建可以覆盖：
 
 ```bash
-FX_VERSION=2.1 FX_BUILD_DATE=20260915 \
+FX_VERSION=3.0 FX_BUILD_DATE=20260916 \
   ./scripts/build-windows-x86-static.sh
 ```
 
@@ -86,7 +86,7 @@ d5a97381b9339c0fbaf13f0c05d599a5c999dcf94145044058198987183fed65
 确认架构：
 
 ```bash
-file dist/windows-x86-static/FxPresser-v2.0-YYYYMMDD.exe
+file dist/windows-x86-static/FxPresser-v3.0-YYYYMMDD.exe
 ```
 
 预期包含：
@@ -99,7 +99,7 @@ PE32 executable (GUI) Intel 80386
 
 ```bash
 i686-w64-mingw32-objdump -p \
-  dist/windows-x86-static/FxPresser-v2.0-YYYYMMDD.exe |
+  dist/windows-x86-static/FxPresser-v3.0-YYYYMMDD.exe |
   sed -n 's/^\s*DLL Name: //p'
 ```
 
@@ -108,7 +108,7 @@ i686-w64-mingw32-objdump -p \
 确认管理员清单：
 
 ```bash
-strings dist/windows-x86-static/FxPresser-v2.0-YYYYMMDD.exe |
+strings dist/windows-x86-static/FxPresser-v3.0-YYYYMMDD.exe |
   grep requireAdministrator
 ```
 

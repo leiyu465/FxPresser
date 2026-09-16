@@ -15,9 +15,25 @@ TEMPLATE = app
 SOURCES += \
     main.cpp \
     fxmainwindow.cpp \
-    sharedinputworker.cpp
+    runtimeconfig.cpp \
+    gamewindowmanager.cpp \
+    inputmodemanager.cpp \
+    sharedinputworker.cpp \
+    keyexecutor.cpp \
+    keyscheduler.cpp \
+    automationcontroller.cpp \
+    globalhotkeymanager.cpp
 
-HEADERS += fxmainwindow.h sharedinputworker.h
+HEADERS += \
+    fxmainwindow.h \
+    runtimeconfig.h \
+    gamewindowmanager.h \
+    inputmodemanager.h \
+    sharedinputworker.h \
+    keyexecutor.h \
+    keyscheduler.h \
+    automationcontroller.h \
+    globalhotkeymanager.h
 RC_FILE = icon.rc
 
 # 生成无需 Qt/MinGW 运行库 DLL 的 32 位 Windows 单文件程序。

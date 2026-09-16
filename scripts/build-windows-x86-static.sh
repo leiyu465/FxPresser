@@ -6,8 +6,8 @@ PROJECT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
 FX_VERSION=${FX_VERSION:-$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")}
 FX_BUILD_DATE=${FX_BUILD_DATE:-$(date -u +%Y%m%d)}
-if [[ ! "$FX_VERSION" =~ ^2\.[0-9]+$ ]]; then
-    printf '版本号必须是2.x格式：%s\n' "$FX_VERSION" >&2
+if [[ ! "$FX_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    printf '版本号必须是两段数字格式，例如3.0：%s\n' "$FX_VERSION" >&2
     exit 1
 fi
 if [[ ! "$FX_BUILD_DATE" =~ ^[0-9]{8}$ ]]; then
