@@ -2,7 +2,7 @@
 
 FxPresser 是一个面向《QQ自由幻想》的 Windows 自动按键工具，按顺序执行启用的 F1～F10。
 
-Windows 32位静态单文件构建参阅 [docs/windows-x86-static-build.md](docs/windows-x86-static-build.md)。重构设计记录参阅 [docs/refactor-design-draft.md](docs/refactor-design-draft.md)。
+Windows 32位静态单文件构建参阅 [docs/windows-x86-static-build.md](docs/windows-x86-static-build.md)。重构设计记录参阅 [docs/refactor-design-draft.md](docs/refactor-design-draft.md)。关于Attach影响真实键鼠输入的分析参阅 [docs/attach-thread-input-analysis.md](docs/attach-thread-input-analysis.md)。
 
 ## 主要功能
 
